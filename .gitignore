@@ -1,0 +1,15 @@
+# gerados no build (GitHub Actions)
+Rede.xcodeproj/
+build/
+*.ipa
+xcodebuild.log
+export.log
+# o workflow vai para .github/workflows à mão (a ponte não grava em .github)
+PARA-A-PASTA-*/
+# segredos nunca entram (o token do roteador fica só no iPhone e no roteador)
+.env
+.env.*
+*.p8
+*.p12
+*.mobileprovision
+.DS_Store

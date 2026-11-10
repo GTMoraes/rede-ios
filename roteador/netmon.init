@@ -1,0 +1,53 @@
+#!/bin/sh /etc/rc.common
+# App Rede: API do roteador na porta 8077 (arquivos em /etc/netmon).
+# A cada boot: recria o arquivo de teste na RAM e o link do CGI (/www fica na RAM),
+# e confere a configuração do nginx (/etc é persistente).
+START=99
+D=/etc/netmon
+NG=/etc/nginx/nginx.conf
+INC='include /etc/netmon/*.nginx;'
+
+reload_nginx() {
+	P=$(ps w | grep '[n]ginx: master' | awk '{print $1}')
+	[ -n "$P" ] && kill -HUP $P
+	return 0
+}
+
+start() {
+	mkdir -p /tmp/netmon /www/cgi-bin
+	[ -f /tmp/netmon/blob ] || \
+		dd if=/dev/zero of=/tmp/netmon/blob bs=1 count=0 seek=268435456 2>/dev/null
+	chmod 755 $D/api.lua
+	ln -sf $D/api.lua /www/cgi-bin/netmon
+	[ -s $D/token ] || openssl rand -hex 16 > $D/token
+	chmod 600 $D/token
+	TOK=$(cat $D/token)
+	CHG=""
+	sed "s/@TOKEN@/$TOK/" $D/site.nginx.tpl > $D/site.new
+	if [ -f $D/site.nginx ] && [ "$(cat $D/site.new)" = "$(cat $D/site.nginx)" ]; then
+		rm -f $D/site.new
+	else
+		mv $D/site.new $D/site.nginx
+		CHG=1
+	fi
+	if ! grep -qF "$INC" $NG; then
+		[ -f $D/nginx.conf.orig ] || cp $NG $D/nginx.conf.orig
+		sed -i "/include *mime.types;/a\\	$INC" $NG
+		CHG=1
+	fi
+	[ -z "$CHG" ] && return 0
+	if nginx -t -c $NG >/dev/null 2>&1; then
+		reload_nginx
+	else
+		# configuração inválida: desfaz, para não derrubar a interface do roteador
+		rm -f $D/site.nginx
+		sed -i '\|/etc/netmon/\*.nginx|d' $NG
+		reload_nginx
+		echo "netmon: nginx -t falhou; nada foi aplicado" >&2
+		return 1
+	fi
+}
+
+stop() {
+	rm -f /www/cgi-bin/netmon
+}

@@ -1,0 +1,101 @@
+name: Gerar e enviar ao TestFlight
+
+on:
+  push:
+    paths-ignore:
+      - '**/*.md'
+      - 'roteador/**'
+      - 'servidor-gt-srv/**'
+  workflow_dispatch:
+
+concurrency:
+  group: build-ipa
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Escolher o Xcode mais novo
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app | grep -vi beta | sort -V | tail -1)
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Gerar o projeto (XcodeGen)
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      # compila e arquiva sem assinatura (serve de conferência mesmo sem os segredos da Apple)
+      - name: Compilar e arquivar
+        env:
+          BUILD: ${{ github.run_number }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -o pipefail
+          xcodebuild -project Rede.xcodeproj -scheme Rede -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' -derivedDataPath build -archivePath build/Rede.xcarchive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CURRENT_PROJECT_VERSION="$BUILD" \
+            archive 2>&1 | tee xcodebuild.log | grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)" || true
+          grep -q "ARCHIVE SUCCEEDED" xcodebuild.log
+
+      # TestFlight: só roda com os 4 segredos do repositório (Settings › Secrets and variables › Actions):
+      #   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8 (texto do .p8 da chave da API do App Store Connect, função Admin)
+      #   e APPLE_TEAM_ID. Assinatura gerenciada pela Apple: nenhum certificado no runner.
+      - name: Enviar ao TestFlight
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          BUILD: ${{ github.run_number }}
+        run: |
+          if [ -z "$ASC_KEY_ID" ] || [ -z "$ASC_ISSUER_ID" ] || [ -z "$ASC_KEY_P8" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "Sem os segredos do App Store Connect: pulei o TestFlight."
+            exit 0
+          fi
+          set -o pipefail
+          K="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"
+          printf '%s\n' "$ASC_KEY_P8" > "$K"
+          AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$K" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+          codesign --force --sign - build/Rede.xcarchive/Products/Applications/Rede.app
+          cat > "$RUNNER_TEMP/export.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>$APPLE_TEAM_ID</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>testFlightInternalTestingOnly</key><true/>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+            <key>uploadSymbols</key><false/>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath build/Rede.xcarchive -exportPath build/export \
+            -exportOptionsPlist "$RUNNER_TEMP/export.plist" "${AUTH[@]}" 2>&1 | tee export.log
+          grep -qE "EXPORT SUCCEEDED|Upload succeeded|Uploaded" export.log
+          rm -f "$K"
+          echo "### TestFlight" >> $GITHUB_STEP_SUMMARY
+          echo "Build $BUILD enviada. Em ~10 a 20 min aparece no app TestFlight do iPhone." >> $GITHUB_STEP_SUMMARY
+
+      - name: Resumo dos erros (se falhar)
+        if: failure()
+        run: |
+          [ -f xcodebuild.log ] && grep -n "error:" xcodebuild.log | head -80 || true
+          [ -f export.log ] && grep -niE "error|failed|ITMS-" export.log | head -60 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs
+          path: |
+            xcodebuild.log
+            export.log
+          if-no-files-found: ignore

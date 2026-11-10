@@ -1,0 +1,19 @@
+# rede-srv: servidor do app Rede (teste de velocidade da LAN, teste de internet pelo cabo
+# e ponte para a API do roteador quando o iPhone está fora de casa, pela Tailscale).
+# Porta 9092 em 0.0.0.0 de propósito (como o NFSU2 na 9091): quem consome é o iPhone,
+# pela LAN ou pela Tailscale. A regra de firewall do Windows libera só 10.0.0.0/24 e 100.64.0.0/10.
+services:
+  rede-srv:
+    image: node:22-alpine
+    container_name: rede-srv
+    restart: unless-stopped
+    working_dir: /app
+    command: ["node", "server.js"]
+    volumes:
+      - ./server.js:/app/server.js:ro
+    environment:
+      PORT: "9092"
+      ROUTER: "http://10.0.0.1:8077"
+    ports:
+      - "9092:9092"
+    mem_limit: 128m

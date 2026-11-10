@@ -1,0 +1,53 @@
+name: Rede
+options:
+  bundleIdPrefix: com.gtm
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+    DEVELOPMENT_TEAM: ""
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+targets:
+  Rede:
+    type: application
+    platform: iOS
+    sources:
+      - App
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Rede
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        LSApplicationCategoryType: public.app-category.utilities
+        # só criptografia padrão (o TLS do https): o TestFlight não pergunta de exportação a cada build
+        ITSAppUsesNonExemptEncryption: false
+        # o roteador (10.0.0.1) e o GT-SRV (10.0.0.129) ficam na rede de casa: pede a permissão de Rede Local
+        NSLocalNetworkUsageDescription: Para ler o status do roteador e medir a velocidade até ele e até o GT-SRV.
+        # roteador e GT-SRV respondem em http (LAN e Tailscale)
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        UILaunchScreen:
+          UIColorName: Fundo
+        UIApplicationSupportsIndirectInputEvents: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIUserInterfaceStyle: Dark
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.gtm.rede
+        # só iPhone: o XcodeGen põe "1,2" no alvo por padrão, e app de iPad sem as quatro orientações é recusado
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    scheme: {}
