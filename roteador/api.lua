@@ -2,7 +2,7 @@
 -- API do app Rede (AX3600). Chamada pelo nginx (porta 8077, /nm/api) via fcgi-cgi.
 -- O nginx já conferiu o token (cabeçalho X-NM-Token) antes de chegar aqui.
 -- Ações (?a=): all (padrão), reset&dev=ethX, reboot (só POST), wantest,
--- block&mac=…, unblock&mac=…, snapshot e mode&m=allow|deny (só POST): controle de acesso ao Wi-Fi;
+-- block, unblock, approve (&mac=…), snapshot e mode&m=allow|deny|approve (só POST): acesso ao Wi-Fi;
 -- name&mac=…&name=…, static_set&mac=…&ip=… e static_del&mac=… (só POST): nomes e IP fixo.
 
 local function rd(p)
@@ -269,10 +269,18 @@ local function valid_mac(m)
   return nil
 end
 
+-- modo do controle: "deny" (lista de bloqueio), "allow" (só autorizados) ou "approve" (aprovação:
+-- quem tem a senha conecta, mas aparelho fora da lista de autorizados fica em quarentena no firewall)
 local function mode()
+  local f = rd(ACLDIR .. "/acl_mode")
+  if f == "allow" or f == "deny" or f == "approve" then return f end
   local m = sh("uci -q get wireless.@wifi-iface[0].macfilter"):match("(%S+)")
   if m == "allow" then return "allow" end
   return "deny"
+end
+
+local function save_mode(md)
+  wr(ACLDIR .. "/acl_mode", md)
 end
 
 local function load_list(kind)
@@ -326,28 +334,108 @@ local function requester()
   return nil
 end
 
--- grava o modo e a lista no uci e no chip, e derruba quem ficou de fora
+-- quarentena (modo aprovação) ----------------------------------------------
+-- Cadeias netmon_q (FORWARD) e netmon_qi (INPUT), em IPv4 e IPv6. Quem entrou pelo Wi-Fi (wl0/wl1) e não está
+-- na lista de autorizados: sem internet, sem os outros aparelhos (bridge-nf-call-iptables=1 faz o tráfego da
+-- bridge passar pelo firewall) e sem o roteador, só DHCP (para aparecer com nome e IP na lista de pendentes).
+-- Limite: o chip do Wi-Fi entrega direto o tráfego entre dois aparelhos da MESMA banda, sem passar pela bridge.
+local QIF = { "wl0", "wl1" }
+
+local function q_script(allow)
+  local L = {}
+  for _, t in ipairs({ { "iptables", false }, { "ip6tables", true } }) do
+    local ipt, v6 = t[1], t[2]
+    L[#L + 1] = ipt .. " -N netmon_q 2>/dev/null; " .. ipt .. " -F netmon_q"
+    L[#L + 1] = ipt .. " -N netmon_qi 2>/dev/null; " .. ipt .. " -F netmon_qi"
+    for _, m in ipairs(allow) do
+      L[#L + 1] = ipt .. " -A netmon_q -m mac --mac-source " .. m .. " -j RETURN"
+      L[#L + 1] = ipt .. " -A netmon_qi -m mac --mac-source " .. m .. " -j RETURN"
+    end
+    for _, wl in ipairs(QIF) do
+      local pd = " -m physdev --physdev-in " .. wl
+      if v6 then
+        L[#L + 1] = ipt .. " -A netmon_qi" .. pd .. " -p ipv6-icmp -j RETURN"
+        L[#L + 1] = ipt .. " -A netmon_qi" .. pd .. " -p udp --dport 547 -j RETURN"
+      else
+        L[#L + 1] = ipt .. " -A netmon_qi" .. pd .. " -p udp --dport 67 -j RETURN"
+      end
+      L[#L + 1] = ipt .. " -A netmon_q" .. pd .. " -j DROP"
+      L[#L + 1] = ipt .. " -A netmon_qi" .. pd .. " -j DROP"
+    end
+    L[#L + 1] = ipt .. " -C FORWARD -j netmon_q 2>/dev/null || " .. ipt .. " -I FORWARD 1 -j netmon_q"
+    L[#L + 1] = ipt .. " -C INPUT -j netmon_qi 2>/dev/null || " .. ipt .. " -I INPUT 1 -j netmon_qi"
+  end
+  return table.concat(L, "\n") .. "\n"
+end
+
+local function q_on(allow)
+  ex("mkdir -p /tmp/netmon")
+  wr("/tmp/netmon/quarentena.sh", q_script(allow))
+  ex("sh /tmp/netmon/quarentena.sh >/dev/null 2>&1")
+end
+
+local function q_off()
+  for _, ipt in ipairs({ "iptables", "ip6tables" }) do
+    ex("( while " .. ipt .. " -D FORWARD -j netmon_q; do :; done; " ..
+       "while " .. ipt .. " -D INPUT -j netmon_qi; do :; done; " ..
+       ipt .. " -F netmon_q; " .. ipt .. " -X netmon_q; " ..
+       ipt .. " -F netmon_qi; " .. ipt .. " -X netmon_qi ) >/dev/null 2>&1")
+  end
+end
+
+local function q_ativa()
+  local out = sh("iptables -C FORWARD -j netmon_q 2>&1; echo rc=$?; ip6tables -C FORWARD -j netmon_q 2>&1; echo rc=$?")
+  local _, n = out:gsub("rc=0", "")
+  return n == 2
+end
+
+-- grava o modo e a lista no uci e no chip, liga/desliga a quarentena e derruba quem ficou de fora
 local function apply(md)
-  local list = load_list(md)
+  local wmd = (md == "allow") and "allow" or "deny"
+  local list = load_list(wmd)
   for _, w in ipairs(WIFACES) do
     local sec = "wireless.@wifi-iface[" .. w[1] .. "]"
     ex("uci -q delete " .. sec .. ".maclist")
     for _, m in ipairs(list) do ex("uci add_list " .. sec .. ".maclist=" .. m) end
-    ex("uci set " .. sec .. ".macfilter=" .. md)
+    ex("uci set " .. sec .. ".macfilter=" .. wmd)
   end
   ex("uci commit wireless")
   local T = wifitool()
   for _, w in ipairs(WIFACES) do
     local cmd = T .. " " .. w[2] .. " maccmd_sec 3"
     for _, m in ipairs(list) do cmd = cmd .. "; " .. T .. " " .. w[2] .. " addmac_sec " .. m end
-    local code = (md == "allow") and "1" or ((#list > 0) and "2" or "0")
+    local code = (wmd == "allow") and "1" or ((#list > 0) and "2" or "0")
     cmd = cmd .. "; " .. T .. " " .. w[2] .. " maccmd_sec " .. code
     ex("( " .. cmd .. " ) >/dev/null 2>&1")
   end
+  if md == "approve" then q_on(load_list("allow")) else q_off() end
   local kick = ""
   for m, wl in pairs(connected()) do
-    local fora = (md == "allow" and not contains(list, m)) or (md == "deny" and contains(list, m))
+    local fora = (wmd == "allow" and not contains(list, m)) or (wmd == "deny" and contains(list, m))
     if fora then kick = kick .. T .. " " .. wl .. " kickmac " .. m .. "; " end
+  end
+  if kick ~= "" then ex("( " .. kick .. ") >/dev/null 2>&1") end
+end
+
+-- aparelhos conectados no Wi-Fi que não estão em nenhuma lista (só no modo aprovação)
+local function pending()
+  local t = {}
+  if mode() ~= "approve" then return t end
+  local allow, deny = load_list("allow"), load_list("deny")
+  for m, wl in pairs(connected()) do
+    if not contains(allow, m) and not contains(deny, m) then t[m] = wl end
+  end
+  return t
+end
+
+-- ao ligar a aprovação: derruba quem está conectado e não é autorizado (volta como pendente; também corta
+-- conexões antigas que a aceleração por hardware manteria abertas)
+local function kick_unapproved()
+  local T = wifitool()
+  local allow = load_list("allow")
+  local kick = ""
+  for m, wl in pairs(connected()) do
+    if not contains(allow, m) then kick = kick .. T .. " " .. wl .. " kickmac " .. m .. "; " end
   end
   if kick ~= "" then ex("( " .. kick .. ") >/dev/null 2>&1") end
 end
@@ -359,8 +447,12 @@ local function acl_json()
     return "[" .. table.concat(t, ",") .. "]"
   end
   local deny = load_list("deny")
-  return '{"mode":' .. q(mode()) .. ',"deny":' .. arr(deny) .. ',"allow":' .. arr(load_list("allow")) .. "}",
-    arr(deny)
+  local pend = {}
+  for m, wl in pairs(pending()) do
+    pend[#pend + 1] = '{"mac":' .. q(m) .. ',"band":' .. q(wl == "wl0" and "5g" or "2g") .. "}"
+  end
+  return '{"mode":' .. q(mode()) .. ',"deny":' .. arr(deny) .. ',"allow":' .. arr(load_list("allow")) ..
+    ',"pending":[' .. table.concat(pend, ",") .. "]}", arr(deny)
 end
 
 -- ações (todas só por POST) -------------------------------------------------
@@ -374,7 +466,18 @@ local function acl_action(a)
     if a == "block" and mac == me then
       return "409 Conflict", '{"error":"Este é o aparelho que está usando o app."}'
     end
-    if md == "allow" then
+    if md == "approve" then
+      -- bloquear = recusar (vai para a lista de bloqueio do chip); liberar = tirar da lista de bloqueio
+      local allow, deny = load_list("allow"), load_list("deny")
+      if a == "block" then
+        allow = without(allow, mac)
+        if not contains(deny, mac) then deny[#deny + 1] = mac end
+      else
+        deny = without(deny, mac)
+      end
+      save_list("allow", allow)
+      save_list("deny", deny)
+    elseif md == "allow" then
       local allow = load_list("allow")
       if a == "block" then allow = without(allow, mac)
       elseif not contains(allow, mac) then allow[#allow + 1] = mac end
@@ -389,7 +492,20 @@ local function acl_action(a)
       save_list("deny", deny)
     end
     apply(md)
+  elseif a == "approve" then
+    -- aprovar: entra na lista de autorizados (e sai da de bloqueio); no modo aprovação, a rede libera na hora
+    local mac = valid_mac(Q.mac)
+    if not mac then return "400 Bad Request", '{"error":"mac"}' end
+    local allow, deny = load_list("allow"), load_list("deny")
+    if not contains(allow, mac) then allow[#allow + 1] = mac end
+    save_list("allow", allow)
+    save_list("deny", without(deny, mac))
+    apply(md)
   elseif a == "snapshot" then
+    -- no modo aprovação, todo conectado fora da lista é um pendente: aprovar é um por um
+    if md == "approve" then
+      return "409 Conflict", '{"error":"No modo aprovação, aprove os aparelhos um por um."}'
+    end
     -- autoriza todos os conectados agora (soma à lista que já existe)
     local allow = load_list("allow")
     local deny = load_list("deny")
@@ -400,8 +516,10 @@ local function acl_action(a)
     if md == "allow" then apply("allow") end
   elseif a == "mode" then
     local novo = Q.m
-    if novo ~= "allow" and novo ~= "deny" then return "400 Bad Request", '{"error":"m"}' end
-    if novo == "allow" then
+    if novo ~= "allow" and novo ~= "deny" and novo ~= "approve" then
+      return "400 Bad Request", '{"error":"m"}'
+    end
+    if novo == "allow" or novo == "approve" then
       local allow = load_list("allow")
       -- quem está usando o app pelo Wi-Fi entra sempre, para não se trancar para fora
       if me and conn[me] and not contains(allow, me) then allow[#allow + 1] = me end
@@ -413,7 +531,9 @@ local function acl_action(a)
     -- guarda as duas listas em arquivo antes de trocar (na primeira troca, a ativa vinha só do uci)
     save_list("deny", load_list("deny"))
     save_list("allow", load_list("allow"))
+    save_mode(novo)
     apply(novo)
+    if novo == "approve" then kick_unapproved() end
   end
   local acl = acl_json()
   return "200 OK", '{"ok":true,"acl":' .. acl .. "}"
@@ -638,6 +758,63 @@ local function wantest()
     ',"streams":' .. n .. "}")
 end
 
+-- vigia do modo aprovação --------------------------------------------------
+-- Refaz a quarentena se uma recarga do firewall apagou as cadeias, e avisa o rede-srv (GT-SRV) de cada
+-- aparelho novo pendente, uma vez por aparelho (o rede-srv manda o push para o app).
+local function nome_de(mac)
+  for line in rdall("/tmp/dhcp.leases"):gmatch("[^\n]+") do
+    local m, nm = line:match("^%d+%s+(%S+)%s+%S+%s+(%S+)")
+    if m and m:lower() == mac and nm ~= "*" then return nm end
+  end
+  local db = opendb()
+  if db then
+    local nm
+    for r in db:nrows("SELECT MAC, ONAME, NICKNAME FROM DEVICE_INFO") do
+      if valid_mac(r.MAC) == mac then
+        nm = (r.NICKNAME ~= nil and r.NICKNAME ~= "") and r.NICKNAME or r.ONAME
+      end
+    end
+    db:close()
+    if nm and nm ~= "" then return nm end
+  end
+  return ""
+end
+
+local function watch()
+  if mode() ~= "approve" then return end
+  if not q_ativa() then q_on(load_list("allow")) end
+  local SEEN = "/tmp/netmon/vistos"
+  local vistos = {}
+  for line in rdall(SEEN):gmatch("[^\n]+") do
+    local m, ts, env = line:match("^(%S+) (%d+) (%d)")
+    if m then vistos[m] = { ts = tonumber(ts), env = env == "1" } end
+  end
+  local agora = os.time()
+  local url = rd(ACLDIR .. "/notify_url") or "http://10.0.0.129:9092/evento"
+  local tok = rd(ACLDIR .. "/token") or ""
+  for m, wl in pairs(pending()) do
+    local v = vistos[m]
+    if not v then
+      vistos[m] = { ts = agora, env = false }
+    elseif not v.env and agora - v.ts >= 10 then
+      local nm = nome_de(m)
+      wr("/tmp/netmon/evento.json", '{"tipo":"pedido","mac":' .. q(m) .. ',"nome":' .. q(nm) ..
+        ',"banda":' .. q(wl == "wl0" and "5 GHz" or "2,4 GHz") .. "}")
+      local r = sh("curl -s -m 8 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' " ..
+        "-H 'X-NM-Token: " .. tok .. "' --data-binary @/tmp/netmon/evento.json '" .. url .. "'")
+      if r:match("^2") then v.env = true end
+    end
+  end
+  local L = {}
+  for m, v in pairs(vistos) do L[#L + 1] = m .. " " .. v.ts .. " " .. (v.env and "1" or "0") end
+  wr(SEEN, table.concat(L, "\n"))
+end
+
+if arg and arg[1] == "watch" then
+  watch()
+  os.exit(0)
+end
+
 -- roteamento ---------------------------------------------------------------
 local a = Q.a or "all"
 if a == "all" then
@@ -680,7 +857,7 @@ elseif a == "name" or a == "static_set" or a == "static_del" then
     end
     if ok then out("200 OK", '{"ok":true}') else out("409 Conflict", '{"error":' .. q(err) .. "}") end
   end
-elseif a == "block" or a == "unblock" or a == "snapshot" or a == "mode" then
+elseif a == "block" or a == "unblock" or a == "approve" or a == "snapshot" or a == "mode" then
   if METHOD ~= "POST" then
     out("405 Method Not Allowed", '{"error":"POST"}')
   else

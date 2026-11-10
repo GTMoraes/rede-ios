@@ -43,6 +43,11 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         UIUserInterfaceStyle: Dark
+    # push (avisos de aparelho novo): o App ID com.gtm.rede precisa ter "Push Notifications" ligado no portal
+    entitlements:
+      path: App/Rede.entitlements
+      properties:
+        aps-environment: production
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gtm.rede

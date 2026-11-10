@@ -13,3 +13,5 @@ PARA-A-PASTA-*/
 *.p12
 *.mobileprovision
 .DS_Store
+# rede-srv: tokens de push
+servidor-gt-srv/dados/

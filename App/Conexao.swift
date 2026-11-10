@@ -7,6 +7,7 @@ enum Chave {
     static let servidorLAN = "servidorLAN"
     static let servidorTS = "servidorTS"
     static let nomes = "nomesAparelhos"
+    static let tokenPush = "tokenPush"
 }
 
 enum Padrao {

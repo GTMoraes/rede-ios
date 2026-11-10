@@ -10,6 +10,10 @@ App nativo (SwiftUI, iOS 26, Liquid Glass) que mostra o estado do roteador AX360
   taxa do link, tráfego atual (📌 = IP fixo). **Tocar** abre a ficha: nome e IP fixo, gravados no roteador (os mesmos da
   tela "DHCP static IP assignment" e do app Mi WiFi). **Arrastar para a esquerda** bloqueia no Wi-Fi (até a metade
   mostra o botão; até o fim, executa).
+- **Aprovação (terceiro modo do Controle):** quem tem a senha conecta, mas aparelho fora da lista de autorizados fica
+  **em quarentena** (só DHCP; sem internet, sem os outros aparelhos e sem o roteador) até ser aprovado. Em ~30 s chega
+  um **push do próprio app** ("Aparelho novo no Wi-Fi"), com os botões Aprovar e Recusar ao segurar o aviso; tocar abre
+  a aba Controle. Na lista, arrastar para a direita aprova e para a esquerda recusa.
 - **Controle (acesso ao Wi-Fi):** dois modos. *Lista de bloqueio*: qualquer um com a senha entra, menos os bloqueados.
   *Só autorizados*: só a lista entra. O botão "Autorizar N de M conectados" copia para a lista de autorizados quem
   está no Wi-Fi e ainda não está nela (quando todos já estão, ele mostra isso e fica desativado). Trocar de modo não derruba quem continua permitido; só quem ficou de fora cai. As duas listas ficam
@@ -97,5 +101,19 @@ Bundle ID `com.gtm.rede`.
   aparelho informa), pelo módulo `lsqlite3` do Lua do roteador (não há `sqlite3` de linha de comando). IP fixo nos dois
   lugares onde a Xiaomi grava: `/etc/config/macbind` (a lista da tela) e `/etc/config/dhcp` (o que o `dnsmasq` usa),
   seção = MAC sem ":", e `dnsmasq reload` (~1 s, ninguém cai). IP novo só vale quando o aparelho renova o DHCP.
+- **Modo aprovação, por dentro:** o modo fica em `/etc/netmon/acl_mode` (`deny`, `allow` ou `approve`); no `approve`
+  o chip do Wi-Fi fica em lista de bloqueio e o firewall ganha as cadeias `netmon_q` (FORWARD) e `netmon_qi` (INPUT), em
+  IPv4 e IPv6: autorizados passam (`-m mac`), o resto que entra por `wl0`/`wl1` (`-m physdev`) é descartado, menos DHCP.
+  Funciona para o tráfego entre aparelhos porque o roteador tem `bridge-nf-call-iptables=1`. Limite: dois aparelhos na
+  **mesma banda** conversam direto pelo chip do Wi-Fi, sem passar pela bridge. O vigia (`/etc/netmon/vigia.sh`, serviço
+  procd do `netmon.init`, a cada 15 s) refaz as cadeias se uma recarga do firewall as apagar e manda cada pendente novo
+  (uma vez) ao `rede-srv`: `POST /evento` com o token do roteador. Endereço do rede-srv: `/etc/netmon/notify_url`
+  (padrão `http://10.0.0.129:9092/evento`).
+- **Push:** o app registra o token de push no `rede-srv` (`POST /push/registrar`, com o token do roteador). O `rede-srv`
+  manda pela Apple (APNs, HTTP/2 + JWT ES256, sem bibliotecas), tópico `com.gtm.rede`. O App ID precisa de "Push
+  Notifications" ligado; o workflow assina com `App/Rede.entitlements` (`aps-environment: production`, gerado pelo
+  XcodeGen). Segredos no `~/rede-srv/.env` do GT-SRV (fora do repositório): `NM_TOKEN` (o token do roteador),
+  `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_KEY_P8_B64` (a mesma chave de push do Porta Fidei, que vale para todos os apps da
+  conta) e `APNS_TOPIC=com.gtm.rede`. Tokens de push em `~/rede-srv/dados/tokens.json`.
 - **Portas:** os contadores e o reset são os mesmos do rodapé e da seção "Port status" da interface do roteador
   (`/etc/wanlink.base` e `/etc/wanlink/base.ethX`).

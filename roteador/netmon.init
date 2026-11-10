@@ -3,6 +3,7 @@
 # A cada boot: recria o arquivo de teste na RAM e o link do CGI (/www fica na RAM),
 # e confere a configuração do nginx (/etc é persistente).
 START=99
+USE_PROCD=1
 D=/etc/netmon
 NG=/etc/nginx/nginx.conf
 INC='include /etc/netmon/*.nginx;'
@@ -13,14 +14,14 @@ reload_nginx() {
 	return 0
 }
 
-start() {
+preparar() {
 	mkdir -p /tmp/netmon /www/cgi-bin
 	# arquivo REAL de 8 MB (o app baixa várias vezes). Não usar arquivo esparso: no kernel 4.4 do
 	# roteador, o sendfile de um arquivo esparso em tmpfs ocupa RAM de verdade (256 MB travaram o roteador
 	# em 10/11/2026).
 	[ -f /tmp/netmon/blob ] || \
 		dd if=/dev/zero of=/tmp/netmon/blob bs=1M count=8 2>/dev/null
-	chmod 755 $D/api.lua
+	chmod 755 $D/api.lua $D/vigia.sh
 	ln -sf $D/api.lua /www/cgi-bin/netmon
 	[ -s $D/token ] || openssl rand -hex 16 > $D/token
 	chmod 600 $D/token
@@ -51,6 +52,15 @@ start() {
 	fi
 }
 
-stop() {
+start_service() {
+	preparar || return 1
+	# vigia do modo aprovação (refaz a quarentena e avisa o rede-srv de aparelho novo)
+	procd_open_instance
+	procd_set_param command /bin/sh $D/vigia.sh
+	procd_set_param respawn
+	procd_close_instance
+}
+
+stop_service() {
 	rm -f /www/cgi-bin/netmon
 }

@@ -2,7 +2,7 @@
 # Instala a API do app Rede no AX3600. Rodar no roteador: sh /tmp/roteador/instalar.sh
 cd "$(dirname "$0")" || exit 1
 mkdir -p /etc/netmon
-cp api.lua site.nginx.tpl /etc/netmon/
+cp api.lua site.nginx.tpl vigia.sh /etc/netmon/
 cp netmon.init /etc/init.d/netmon
 chmod 755 /etc/init.d/netmon /etc/netmon/api.lua
 /etc/init.d/netmon enable
@@ -25,6 +25,7 @@ curl -s -H "$H" -o /dev/null -w "bloqueio sem POST (esperado 405): %{http_code}\
 	"$B/api?a=block&mac=00:00:00:00:00:00"
 echo "Wi-Fi: modo $(uci -q get wireless.@wifi-iface[0].macfilter), lista: $(uci -q get wireless.@wifi-iface[0].maclist)"
 free | sed -n 2p
+echo "vigia: $(ps w | grep -c '[v]igia.sh') rodando"
 ls /etc/rc.d | grep netmon
 echo
 echo "TOKEN DO APP: $T"

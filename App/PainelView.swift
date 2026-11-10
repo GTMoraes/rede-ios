@@ -143,10 +143,11 @@ struct PainelView: View {
                 }
             }
             if let acl = estado.acl {
-                LinhaInfo(rotulo: "Acesso ao Wi-Fi",
-                          valor: acl.soAutorizados ? "Só autorizados (\(acl.allow.count))"
-                                                   : "Lista de bloqueio (\(acl.deny.count))",
-                          cor: acl.soAutorizados ? Tema.verde : .primary)
+                LinhaInfo(rotulo: "Acesso ao Wi-Fi", valor: acl.nomeDoModo,
+                          cor: acl.mode == "deny" ? .primary : Tema.verde)
+                if !acl.pendentes.isEmpty {
+                    LinhaInfo(rotulo: "Esperando aprovação", valor: "\(acl.pendentes.count)", cor: Tema.laranja)
+                }
             }
         }
     }

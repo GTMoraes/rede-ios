@@ -62,12 +62,43 @@ struct IPFixo: Decodable {
 }
 
 struct ACL: Decodable {
+    /// "deny" = lista de bloqueio, "allow" = só autorizados, "approve" = aprovação (quarentena).
     let mode: String
     let allow: [String]
     let deny: [String]
+    /// Conectados no Wi-Fi esperando aprovação (só no modo aprovação).
+    var pending: [Pendente]? = nil
     var soAutorizados: Bool { mode == "allow" }
-    /// A lista que vale agora (bloqueados ou autorizados).
-    var ativa: [String] { soAutorizados ? allow : deny }
+    var aprovacao: Bool { mode == "approve" }
+    var pendentes: [Pendente] { pending ?? [] }
+
+    var nomeDoModo: String {
+        switch mode {
+        case "allow": return "Só autorizados"
+        case "approve": return "Aprovação"
+        default: return "Lista de bloqueio"
+        }
+    }
+}
+
+struct Pendente: Decodable {
+    let mac: String
+    let band: String
+}
+
+/// Situação de um aparelho na aba Controle.
+enum Situacao: Int {
+    case pendente = 0
+    case autorizado = 1
+    case bloqueado = 2
+
+    var texto: String {
+        switch self {
+        case .pendente: return "aguardando aprovação"
+        case .autorizado: return "autorizado"
+        case .bloqueado: return "bloqueado"
+        }
+    }
 }
 
 
@@ -227,6 +258,8 @@ struct Aparelho: Identifiable {
     var online = false
     /// É o iPhone que está usando o app: não pode ser bloqueado por ele mesmo.
     var euMesmo = false
+    /// Na aba Controle: pendente, autorizado ou bloqueado. Nas bandas: só "pendente" (modo aprovação).
+    var situacao: Situacao?
 
     /// 0 a 1, para o símbolo de Wi-Fi.
     var sinal: Double {

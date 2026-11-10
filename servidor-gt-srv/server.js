@@ -4,11 +4,16 @@
 //   /up                 upload do teste: lê tudo e responde quantos bytes chegaram
 //   /wantest?secs=8     teste de internet pelo cabo (GT-SRV → Cloudflare), sem Wi-Fi no caminho
 //   /router/...         ponte para a API do roteador (http://10.0.0.1:8077/...), para usar fora de casa
-// Sem segredo aqui: o token do roteador vem do app no cabeçalho X-NM-Token e só é repassado.
+//   /push/registrar     o app manda o token de push dele (POST {token}); exige X-NM-Token
+//   /evento             o roteador avisa de aparelho novo no modo aprovação (POST); exige X-NM-Token
+// Segredos só no ~/rede-srv/.env (fora do repositório): NM_TOKEN (o mesmo token do roteador) e a chave de push
+// da Apple (APNS_KEY_ID, APNS_TEAM_ID, APNS_KEY_P8_B64, APNS_TOPIC). Os tokens de push ficam em /dados.
 'use strict';
 const http = require('http');
 const https = require('https');
+const http2 = require('http2');
 const crypto = require('crypto');
+const fs = require('fs');
 
 const PORT = Number(process.env.PORT || 9092);
 const ROUTER = new URL(process.env.ROUTER || 'http://10.0.0.1:8077');
@@ -176,6 +181,123 @@ function ponte(req, res, u) {
   req.pipe(r);
 }
 
+// ---- push pela Apple (APNs), sem bibliotecas: JWT ES256 com o crypto do Node e HTTP/2 -----------------
+const NM_TOKEN = (process.env.NM_TOKEN || '').trim();
+const APNS = {
+  keyId: process.env.APNS_KEY_ID || '',
+  teamId: process.env.APNS_TEAM_ID || '',
+  topic: process.env.APNS_TOPIC || 'com.gtm.rede',
+  host: process.env.APNS_HOST || 'https://api.push.apple.com',
+  p8: process.env.APNS_KEY_P8_B64 ? Buffer.from(process.env.APNS_KEY_P8_B64, 'base64').toString('utf8') : '',
+};
+const DADOS = process.env.DADOS || '/dados';
+const ARQ_TOKENS = DADOS + '/tokens.json';
+
+function lerTokens() {
+  try { return JSON.parse(fs.readFileSync(ARQ_TOKENS, 'utf8')); } catch { return []; }
+}
+function gravarTokens(t) {
+  try { fs.mkdirSync(DADOS, { recursive: true }); fs.writeFileSync(ARQ_TOKENS, JSON.stringify(t)); } catch (e) {
+    console.error('tokens:', e.message);
+  }
+}
+
+const b64url = (b) => Buffer.from(b).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+let jwtCache = { valor: '', em: 0 };
+function jwtApns() {
+  const agora = Math.floor(Date.now() / 1000);
+  if (jwtCache.valor && agora - jwtCache.em < 50 * 60) return jwtCache.valor;
+  const cab = b64url(JSON.stringify({ alg: 'ES256', kid: APNS.keyId }));
+  const corpo = b64url(JSON.stringify({ iss: APNS.teamId, iat: agora }));
+  const ass = crypto.sign('sha256', Buffer.from(cab + '.' + corpo), { key: APNS.p8, dsaEncoding: 'ieee-p1363' });
+  jwtCache = { valor: cab + '.' + corpo + '.' + b64url(ass), em: agora };
+  return jwtCache.valor;
+}
+
+function enviarPush(token, payload) {
+  return new Promise((ok) => {
+    let sessao;
+    try { sessao = http2.connect(APNS.host); } catch (e) { return ok({ status: 0, corpo: e.message }); }
+    sessao.on('error', (e) => ok({ status: 0, corpo: e.message }));
+    const r = sessao.request({
+      ':method': 'POST', ':path': '/3/device/' + token,
+      authorization: 'bearer ' + jwtApns(),
+      'apns-topic': APNS.topic, 'apns-push-type': 'alert', 'apns-priority': '10',
+      'content-type': 'application/json',
+    });
+    let status = 0;
+    let corpo = '';
+    r.on('response', (h) => { status = h[':status']; });
+    r.on('data', (c) => { corpo += c; });
+    r.on('end', () => { sessao.close(); ok({ status, corpo }); });
+    r.on('error', (e) => { sessao.close(); ok({ status: 0, corpo: e.message }); });
+    r.setTimeout(10000, () => r.close());
+    r.end(JSON.stringify(payload));
+  });
+}
+
+async function avisarTodos(payload) {
+  const tokens = lerTokens();
+  if (!APNS.p8 || !APNS.keyId || !APNS.teamId) return { enviados: 0, erro: 'APNs não configurado no .env' };
+  let enviados = 0;
+  const validos = [];
+  for (const t of tokens) {
+    const r = await enviarPush(t, payload);
+    if (r.status === 200) enviados++;
+    // 410 / BadDeviceToken: o app foi apagado ou o token mudou
+    if (r.status === 410 || /BadDeviceToken|Unregistered/.test(r.corpo)) continue;
+    if (r.status !== 200) console.error('apns', r.status, r.corpo);
+    validos.push(t);
+  }
+  if (validos.length !== tokens.length) gravarTokens(validos);
+  return { enviados };
+}
+
+function lerCorpo(req, limite = 64 * 1024) {
+  return new Promise((ok, falha) => {
+    let b = '';
+    req.on('data', (c) => { b += c; if (b.length > limite) { req.destroy(); falha(new Error('grande demais')); } });
+    req.on('end', () => ok(b));
+    req.on('error', falha);
+  });
+}
+
+function autorizado(req) {
+  return NM_TOKEN !== '' && req.headers['x-nm-token'] === NM_TOKEN;
+}
+
+async function registrar(req, res) {
+  if (!autorizado(req)) return json(res, 403, { error: 'token' });
+  try {
+    const { token } = JSON.parse(await lerCorpo(req));
+    if (!/^[0-9a-f]{32,200}$/i.test(token || '')) return json(res, 400, { error: 'token de push inválido' });
+    const t = lerTokens();
+    if (!t.includes(token)) { t.push(token); gravarTokens(t.slice(-10)); }
+    json(res, 200, { ok: true, push: Boolean(APNS.p8) });
+  } catch (e) {
+    json(res, 400, { error: e.message });
+  }
+}
+
+async function evento(req, res) {
+  if (!autorizado(req)) return json(res, 403, { error: 'token' });
+  try {
+    const ev = JSON.parse(await lerCorpo(req));
+    if (ev.tipo !== 'pedido') return json(res, 400, { error: 'tipo' });
+    const quem = ev.nome ? `${ev.nome} (${ev.banda})` : `Um aparelho sem nome (${ev.banda}, ${ev.mac})`;
+    const r = await avisarTodos({
+      aps: {
+        alert: { title: 'Aparelho novo no Wi-Fi', body: `${quem} quer usar a rede. Segure para aprovar ou recusar.` },
+        sound: 'default', category: 'PEDIDO', 'thread-id': 'pedidos',
+      },
+      mac: ev.mac, nome: ev.nome || '',
+    });
+    json(res, 200, r);
+  } catch (e) {
+    json(res, 400, { error: e.message });
+  }
+}
+
 const srv = http.createServer((req, res) => {
   let u;
   try { u = new URL(req.url, 'http://x'); } catch { return json(res, 400, { error: 'url' }); }
@@ -185,6 +307,8 @@ const srv = http.createServer((req, res) => {
   if (p === '/up' && req.method === 'POST') return upload(req, res);
   if (p === '/wantest') return wantest(req, res, u);
   if (p.startsWith('/router/')) return ponte(req, res, u);
+  if (p === '/push/registrar' && req.method === 'POST') return registrar(req, res);
+  if (p === '/evento' && req.method === 'POST') return evento(req, res);
   json(res, 404, { error: 'nada aqui' });
 });
 srv.requestTimeout = 0;

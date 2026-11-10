@@ -46,6 +46,7 @@ final class Estado {
             dados = try await Rede.json(RespostaRoteador.self, r)
             atualizadoEm = Date()
             erro = nil
+            await registrarPush()
         } catch {
             erro = error.localizedDescription
             enderecos = nil  // procura de novo na próxima vez
@@ -127,11 +128,37 @@ final class Estado {
         await acaoAcesso("a=snapshot")
     }
 
-    func definirSoAutorizados(_ sim: Bool) async -> String? {
-        await acaoAcesso("a=mode&m=\(sim ? "allow" : "deny")")
+    /// "deny" (lista de bloqueio), "allow" (só autorizados) ou "approve" (aprovação).
+    func definirModo(_ m: String) async -> String? {
+        await acaoAcesso("a=mode&m=\(m)")
+    }
+
+    /// Aprova um aparelho (entra na lista de autorizados; no modo aprovação, a rede libera na hora).
+    func aprovar(mac: String) async -> String? {
+        await acaoAcesso("a=approve&mac=\(mac)")
+    }
+
+    // MARK: push
+
+    /// Manda o token de push deste iPhone ao rede-srv (uma vez por sessão e por servidor).
+    private var pushEnviado: String?
+
+    func registrarPush() async {
+        guard let token = UserDefaults.standard.string(forKey: Chave.tokenPush), !token.isEmpty,
+              let srv = enderecos?.servidor else { return }
+        let chave = srv.absoluteString + token
+        if pushEnviado == chave { return }
+        var r = Rede.pedido(Rede.url(srv, "/push/registrar"), metodo: "POST", timeout: 8)
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = try? JSONSerialization.data(withJSONObject: ["token": token])
+        if (try? await Rede.dados(r)) != nil { pushEnviado = chave }
     }
 
     var acl: ACL? { dados?.acl }
+
+    var pendentes: [Aparelho] {
+        aparelhos.filter { $0.banda == .controle && $0.situacao == .pendente }
+    }
 
     /// Conectados no Wi-Fi agora que ainda não estão na lista de autorizados.
     var naoAutorizados: [Aparelho] {
@@ -219,6 +246,7 @@ final class Estado {
         // bloqueado que ainda aparece conectado (o chip leva um instante para derrubar) não entra nas bandas
         var vistos = d.acl.soAutorizados ? Set<String>() : Set(d.acl.deny)
         var conectados = Set<String>()
+        let pendentes = Set(d.acl.pendentes.map { $0.mac.lowercased() })
         for (banda, clientes) in [(Banda.g5, d.wifi.g5), (Banda.g2, d.wifi.g2)] {
             for c in clientes where !vistos.contains(c.mac) {
                 vistos.insert(c.mac)
@@ -230,6 +258,7 @@ final class Estado {
                 a.modo = c.mode
                 a.online = true
                 a.euMesmo = c.mac == eu
+                if pendentes.contains(c.mac) { a.situacao = .pendente }
                 conectados.insert(c.mac)
                 lista.append(a)
             }
@@ -246,14 +275,31 @@ final class Estado {
             a.dev = f.dev
             lista.append(a)
         }
-        // aba Controle: a lista que vale agora (bloqueados ou autorizados), conectados ou não
-        for mac in d.acl.ativa {
+        // aba Controle: as listas que valem no modo atual, conectados ou não
+        var itens: [(String, Situacao)] = []
+        switch d.acl.mode {
+        case "approve":
+            for mac in pendentes.sorted() { itens.append((mac, Situacao.pendente)) }
+            for mac in d.acl.allow { itens.append((mac, Situacao.autorizado)) }
+            for mac in d.acl.deny { itens.append((mac, Situacao.bloqueado)) }
+        case "allow":
+            for mac in d.acl.allow { itens.append((mac, Situacao.autorizado)) }
+        default:
+            for mac in d.acl.deny { itens.append((mac, Situacao.bloqueado)) }
+        }
+        var naLista = Set<String>()
+        for (mac, situacao) in itens where !naLista.contains(mac) {
+            naLista.insert(mac)
             var a = montar(mac, banda: .controle)
             a.online = conectados.contains(mac)
             a.euMesmo = mac == eu
+            a.situacao = situacao
             lista.append(a)
         }
         return lista.sorted {
+            // na aba Controle, os pendentes vêm primeiro
+            let o0 = $0.situacao?.rawValue ?? 1, o1 = $1.situacao?.rawValue ?? 1
+            if $0.banda == .controle && $1.banda == .controle && o0 != o1 { return o0 < o1 }
             if $0.nome == "Sem nome" && $1.nome != "Sem nome" { return false }
             if $1.nome == "Sem nome" && $0.nome != "Sem nome" { return true }
             return $0.nome.localizedCaseInsensitiveCompare($1.nome) == .orderedAscending

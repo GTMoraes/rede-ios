@@ -11,6 +11,11 @@ services:
     command: ["node", "server.js"]
     volumes:
       - ./server.js:/app/server.js:ro
+      - ./dados:/dados
+    # segredos (fora do repositório): NM_TOKEN e a chave de push da Apple. Ver o LEIA-ME.
+    env_file:
+      - path: .env
+        required: false
     environment:
       PORT: "9092"
       ROUTER: "http://10.0.0.1:8077"

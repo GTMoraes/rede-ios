@@ -64,7 +64,8 @@ jobs:
           K="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"
           printf '%s\n' "$ASC_KEY_P8" > "$K"
           AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$K" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
-          codesign --force --sign - build/Rede.xcarchive/Products/Applications/Rede.app
+          # assinatura provisória já com as permissões (push); a exportação assina de verdade e as mantém
+          codesign --force --sign - --entitlements App/Rede.entitlements build/Rede.xcarchive/Products/Applications/Rede.app
           cat > "$RUNNER_TEMP/export.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

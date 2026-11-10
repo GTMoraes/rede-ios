@@ -9,8 +9,9 @@ struct AparelhosView: View {
     /// Linhas que acabaram de ser arrastadas até o fim: saem da tela enquanto o roteador aplica.
     @State private var saindo = Set<String>()
     @State private var aviso: String?
-    @State private var perguntandoLigar = false
-    @State private var perguntandoDesligar = false
+    /// Modo pedido no seletor, esperando confirmação ("deny", "approve" ou "allow").
+    @State private var modoPedido: String?
+    @Bindable private var nav = Navegacao.shared
     @State private var ocupado = false
     /// Portas recolhidas na aba Cabo (por padrão, todas abertas).
     @State private var fechadas = Set<String>()
@@ -58,28 +59,19 @@ struct AparelhosView: View {
             } message: {
                 Text(aviso ?? "")
             }
-            .confirmationDialog("Ligar \"só autorizados\"?", isPresented: $perguntandoLigar,
-                                titleVisibility: .visible) {
-                Button(estado.naoAutorizados.isEmpty ? "Ligar" : "Autorizar os \(estado.naoAutorizados.count) que faltam e ligar") {
-                    executar { await estado.autorizarConectados() } depois: { await estado.definirSoAutorizados(true) }
-                }
-                if (estado.acl?.allow.count ?? 0) > 0 {
-                    Button("Ligar com a lista atual (\(estado.acl?.allow.count ?? 0))", role: .destructive) {
-                        executar { await estado.definirSoAutorizados(true) }
-                    }
-                }
-                Button("Cancelar", role: .cancel) {}
-            } message: {
-                Text(mensagemLigar)
+            .confirmationDialog(tituloModo, isPresented: Binding(get: { modoPedido != nil },
+                                                                 set: { if !$0 { modoPedido = nil } }),
+                                titleVisibility: .visible, presenting: modoPedido) { m in
+                botoesModo(m)
+            } message: { m in
+                Text(mensagemModo(m))
             }
-            .confirmationDialog("Voltar para a lista de bloqueio?", isPresented: $perguntandoDesligar,
-                                titleVisibility: .visible) {
-                Button("Voltar para a lista de bloqueio") {
-                    executar { await estado.definirSoAutorizados(false) }
+            // tocar no aviso de aparelho novo abre direto a aba Controle
+            .onChange(of: nav.pedidoPendentes, initial: true) { _, pedido in
+                if pedido {
+                    banda = .controle
+                    nav.pedidoPendentes = false
                 }
-                Button("Cancelar", role: .cancel) {}
-            } message: {
-                Text("Qualquer aparelho com a senha volta a conseguir entrar, menos os da lista de bloqueio. A lista de autorizados fica guardada para a próxima vez.")
             }
         }
     }
@@ -93,6 +85,16 @@ struct AparelhosView: View {
             .opacity(saindo.contains(a.mac) ? 0 : 1)
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                 botaoDoGesto(a)
+            }
+            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                if a.situacao == .pendente {
+                    Button {
+                        executar { await estado.aprovar(mac: a.mac) }
+                    } label: {
+                        Label("Aprovar", systemImage: "checkmark.circle.fill")
+                    }
+                    .tint(Tema.verde)
+                }
             }
             .linhaDeLista()
             .contextMenu { menu(a) }
@@ -141,38 +143,25 @@ struct AparelhosView: View {
 
     private var controle: some View {
         let acl = estado.acl
-        let so = acl?.soAutorizados == true
-        return Cartao(titulo: "Acesso ao Wi-Fi", icone: so ? "lock.shield.fill" : "lock.open") {
-            Picker("Modo", selection: Binding(get: { so }, set: { novo in
-                if novo != so {
-                    if novo { perguntandoLigar = true } else { perguntandoDesligar = true }
-                }
+        let modo = acl?.mode ?? "deny"
+        return Cartao(titulo: "Acesso ao Wi-Fi", icone: modo == "deny" ? "lock.open" : "lock.shield.fill") {
+            Picker("Modo", selection: Binding(get: { modo }, set: { novo in
+                if novo != modo { modoPedido = novo }
             })) {
-                Text("Lista de bloqueio").tag(false)
-                Text("Só autorizados").tag(true)
+                Text("Bloqueio").tag("deny")
+                Text("Aprovação").tag("approve")
+                Text("Autorizados").tag("allow")
             }
             .pickerStyle(.segmented)
             .disabled(ocupado || acl == nil)
 
-            Text(so
-                 ? "Só os aparelhos da lista entram (\(acl?.allow.count ?? 0)). Os outros não conseguem conectar, mesmo com a senha."
-                 : "Qualquer aparelho com a senha entra, menos os bloqueados (\(acl?.deny.count ?? 0)).")
+            Text(descricao(modo))
                 .font(.caption)
                 .foregroundStyle(Tema.texto2)
 
-            let novos = estado.naoAutorizados.count
-            Button {
-                executar({ await estado.autorizarConectados() }, sucesso: "\(novos) autorizado\(novos == 1 ? "" : "s").")
-            } label: {
-                Label(novos == 0
-                      ? "Todos os \(conectadosWifi) conectados estão autorizados"
-                      : "Autorizar \(novos) de \(conectadosWifi) conectados",
-                      systemImage: novos == 0 ? "checkmark.seal.fill" : "person.badge.plus")
-                    .frame(maxWidth: .infinity)
+            if modo != "approve" {
+                botaoAutorizar
             }
-            .buttonStyle(.glass)
-            .tint(novos == 0 ? Tema.verde : Tema.acento)
-            .disabled(ocupado || acl == nil || novos == 0)
 
             if ocupado {
                 ProgressView().frame(maxWidth: .infinity)
@@ -180,20 +169,93 @@ struct AparelhosView: View {
         }
     }
 
-    private var conectadosWifi: Int {
-        estado.aparelhos.filter { $0.banda == .g5 || $0.banda == .g2 }.count
+    /// Copia para a lista de autorizados quem está no Wi-Fi e ainda não está nela (fora do modo aprovação).
+    private var botaoAutorizar: some View {
+        let novos = estado.naoAutorizados.count
+        return Button {
+            executar({ await estado.autorizarConectados() }, sucesso: "\(novos) autorizado\(novos == 1 ? "" : "s").")
+        } label: {
+            Label(novos == 0
+                  ? "Todos os \(conectadosWifi) conectados estão autorizados"
+                  : "Autorizar \(novos) de \(conectadosWifi) conectados",
+                  systemImage: novos == 0 ? "checkmark.seal.fill" : "person.badge.plus")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.glass)
+        .tint(novos == 0 ? Tema.verde : Tema.acento)
+        .disabled(ocupado || estado.acl == nil || novos == 0)
     }
 
-    private var mensagemLigar: String {
+    private func descricao(_ modo: String) -> String {
+        let acl = estado.acl
+        switch modo {
+        case "allow":
+            return "Só os aparelhos da lista entram (\(acl?.allow.count ?? 0)). Os outros não conseguem conectar, mesmo com a senha."
+        case "approve":
+            return "Quem tem a senha conecta, mas aparelho novo fica sem rede até você aprovar. Você recebe um aviso no iPhone."
+        default:
+            return "Qualquer aparelho com a senha entra, menos os bloqueados (\(acl?.deny.count ?? 0))."
+        }
+    }
+
+    private var tituloModo: String {
+        switch modoPedido {
+        case "allow": return "Ligar \"só autorizados\"?"
+        case "approve": return "Ligar a aprovação?"
+        default: return "Voltar para a lista de bloqueio?"
+        }
+    }
+
+    @ViewBuilder
+    private func botoesModo(_ m: String) -> some View {
+        if m == "deny" {
+            Button("Voltar para a lista de bloqueio") {
+                executar { await estado.definirModo("deny") }
+            }
+        } else if estado.acl?.aprovacao == true {
+            Button("Ligar \"só autorizados\"") {
+                executar { await estado.definirModo(m) }
+            }
+        } else {
+            let faltam = estado.naoAutorizados.count
+            let naLista = estado.acl?.allow.count ?? 0
+            Button(faltam == 0 ? "Ligar" : "Autorizar os \(faltam) conectados que faltam e ligar") {
+                executar { await estado.autorizarConectados() } depois: { await estado.definirModo(m) }
+            }
+            if naLista > 0 && faltam > 0 {
+                Button("Ligar com a lista atual (\(naLista))", role: .destructive) {
+                    executar { await estado.definirModo(m) }
+                }
+            }
+        }
+        Button("Cancelar", role: .cancel) {}
+    }
+
+    private func mensagemModo(_ m: String) -> String {
+        if m == "deny" {
+            return "Qualquer aparelho com a senha volta a conseguir entrar, menos os bloqueados. As listas ficam guardadas para a próxima vez."
+        }
+        if estado.acl?.aprovacao == true {
+            let p = estado.pendentes.count
+            return "Os autorizados continuam. " + (p == 0 ? "" : "Os \(p) pendentes caem e não conseguem mais entrar, mesmo com a senha.")
+        }
         let fora = estado.ficariamDeFora
+        let efeito = m == "allow"
+            ? "Quem não estiver na lista não consegue mais entrar, mesmo com a senha."
+            : "Quem não estiver na lista conecta, mas fica sem rede até você aprovar."
         if (estado.acl?.allow.count ?? 0) == 0 {
-            return "Os \(conectadosWifi) aparelhos conectados agora entram na lista e continuam conectados. Quem não estiver na lista não consegue mais entrar, mesmo com a senha."
+            return "Os \(conectadosWifi) aparelhos conectados agora entram na lista e continuam conectados. \(efeito)"
         }
         if fora.isEmpty {
-            return "Todos os conectados agora já estão autorizados. Ninguém cai."
+            return "Todos os conectados agora já estão autorizados. Ninguém cai. \(efeito)"
         }
         let nomes = fora.prefix(6).map { $0.nome }.joined(separator: ", ")
-        return "Com a lista atual, \(fora.count) conectados cairiam: \(nomes)\(fora.count > 6 ? "…" : ""). Para manter todos, use \"Autorizar os conectados e ligar\"."
+        let destino = m == "allow" ? "cairiam" : "cairiam e voltariam como pendentes"
+        return "Com a lista atual, \(fora.count) conectados \(destino): \(nomes)\(fora.count > 6 ? "…" : ""). Para manter todos, use \"Autorizar os conectados que faltam e ligar\"."
+    }
+
+    private var conectadosWifi: Int {
+        estado.aparelhos.filter { $0.banda == .g5 || $0.banda == .g2 }.count
     }
 
     private func executar(_ passo: @escaping () async -> String?,
@@ -246,10 +308,20 @@ struct AparelhosView: View {
         let so = estado.acl?.soAutorizados == true
         switch a.banda {
         case .g5, .g2:
+            if a.situacao == .pendente {
+                return Acao(titulo: "Recusar", icone: "hand.raised.fill", bloquear: true)
+            }
             return Acao(titulo: "Bloquear", icone: "hand.raised.fill", bloquear: true)
         case .controle:
-            return so ? Acao(titulo: "Remover", icone: "person.badge.minus", bloquear: true)
-                      : Acao(titulo: "Desbloquear", icone: "hand.thumbsup.fill", bloquear: false)
+            switch a.situacao {
+            case .pendente:
+                return Acao(titulo: "Recusar", icone: "hand.raised.fill", bloquear: true)
+            case .bloqueado:
+                return Acao(titulo: "Desbloquear", icone: "hand.thumbsup.fill", bloquear: false)
+            default:
+                return so ? Acao(titulo: "Remover", icone: "person.badge.minus", bloquear: true)
+                          : Acao(titulo: "Bloquear", icone: "hand.raised.fill", bloquear: true)
+            }
         case .cabo:
             return nil
         }
@@ -274,12 +346,20 @@ struct AparelhosView: View {
         } label: {
             Label("Copiar MAC", systemImage: "doc.on.doc")
         }
+        if a.situacao == .pendente {
+            Button {
+                executar { await estado.aprovar(mac: a.mac) }
+            } label: {
+                Label("Aprovar", systemImage: "checkmark.circle.fill")
+            }
+        }
         if let acao = acaoDoGesto(a) {
             if acao.bloquear {
                 Button(role: .destructive) {
                     alternar(a, bloquear: true)
                 } label: {
-                    Label(acao.titulo == "Remover" ? "Remover dos autorizados" : "Bloquear no Wi-Fi",
+                    Label(acao.titulo == "Remover" ? "Remover dos autorizados"
+                          : (acao.titulo == "Recusar" ? "Recusar" : "Bloquear no Wi-Fi"),
                           systemImage: acao.icone)
                 }
             } else {
@@ -305,6 +385,11 @@ struct AparelhosView: View {
         let so = estado.acl?.soAutorizados == true
         switch banda {
         case .controle:
+            if estado.acl?.aprovacao == true {
+                let p = estado.pendentes.count
+                let base = p == 0 ? "Nenhum pendente. " : "\(p) esperando aprovação: arraste para a direita para aprovar, para a esquerda para recusar. "
+                return base + "Autorizados e bloqueados ficam abaixo."
+            }
             if so { return n == 0 ? "Nenhum autorizado." : "Autorizados (\(n)). Arraste para a esquerda para remover." }
             return n == 0 ? "Nenhum aparelho bloqueado." : "Bloqueados (\(n)). Arraste para a esquerda para desbloquear."
         case .cabo:
@@ -407,8 +492,10 @@ struct LinhaAparelho: View {
                 if let c = a.conectado {
                     Text("conectado há \(c)").font(.caption2).foregroundStyle(Tema.texto2)
                 }
-                if a.banda == .controle {
-                    Text(a.online ? "conectado agora" : "fora do ar").font(.caption2).foregroundStyle(Tema.texto2)
+                if let t = textoSituacao {
+                    Text(t)
+                        .font(a.situacao == .pendente ? Font.caption2.weight(.semibold) : Font.caption2)
+                        .foregroundStyle(a.situacao == .pendente ? Tema.laranja : Tema.texto2)
                 }
                 if a.euMesmo {
                     Text("este iPhone").font(.caption2.weight(.semibold)).foregroundStyle(Tema.acento)
@@ -433,6 +520,13 @@ struct LinhaAparelho: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: .rect(cornerRadius: filho ? 16 : 20))
         .contentShape(Rectangle())
+    }
+
+    private var textoSituacao: String? {
+        guard let sit = a.situacao else { return nil }
+        if a.banda != .controle { return sit == .pendente ? sit.texto : nil }
+        let onde = a.online ? "conectado agora" : "fora do ar"
+        return sit.texto + " · " + onde
     }
 
     private var cor: Color {
