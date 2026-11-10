@@ -5,12 +5,14 @@ App nativo (SwiftUI, iOS 26, Liquid Glass) que mostra o estado do roteador AX360
 - **Painel:** internet (PPPoE, há quanto tempo, IP público, prefixo IPv6, DNS), as 4 portas (velocidade, quedas, CRC,
   zerar contadores com toque longo), quantos aparelhos em cada banda, roteador (ligado há, carga, memória) e
   **Reiniciar o roteador** (com confirmação).
-- **Aparelhos:** 5 GHz, 2,4 GHz, Cabo (inclui os aparelhos atrás do roteador IoT) e Controle. Nome, IP, MAC, sinal,
-  taxa do link, tráfego atual. Toque para dar um nome (fica só no iPhone). **Arrastar para a esquerda** bloqueia no
-  Wi-Fi (até a metade mostra o botão; até o fim, executa).
+- **Aparelhos:** 5 GHz, 2,4 GHz, Cabo (em árvore: cada porta com os aparelhos atrás dela, como o roteador IoT e
+  o GT-SRV; toque na porta para abrir ou fechar) e Controle. Nome, IP, MAC, sinal,
+  taxa do link, tráfego atual (📌 = IP fixo). **Tocar** abre a ficha: nome e IP fixo, gravados no roteador (os mesmos da
+  tela "DHCP static IP assignment" e do app Mi WiFi). **Arrastar para a esquerda** bloqueia no Wi-Fi (até a metade
+  mostra o botão; até o fim, executa).
 - **Controle (acesso ao Wi-Fi):** dois modos. *Lista de bloqueio*: qualquer um com a senha entra, menos os bloqueados.
-  *Só autorizados*: só a lista entra. "Autorizar os conectados agora" copia quem está no Wi-Fi para a lista de
-  autorizados. Trocar de modo não derruba quem continua permitido; só quem ficou de fora cai. As duas listas ficam
+  *Só autorizados*: só a lista entra. O botão "Autorizar N de M conectados" copia para a lista de autorizados quem
+  está no Wi-Fi e ainda não está nela (quando todos já estão, ele mostra isso e fica desativado). Trocar de modo não derruba quem continua permitido; só quem ficou de fora cai. As duas listas ficam
   guardadas no roteador.
 - **Velocidade:** iPhone → Internet (Cloudflare), Roteador → Internet, GT-SRV → Internet (cabo), iPhone ↔ Roteador
   (só o Wi-Fi) e iPhone ↔ GT-SRV. Download, upload e latência; os últimos resultados ficam guardados.
@@ -90,5 +92,10 @@ Bundle ID `com.gtm.rede`.
   sozinho na lista ao ligar "só autorizados"; ligar com a lista vazia é recusado. Vale para 5 GHz e 2,4 GHz do AX3600; o Wi-Fi do roteador IoT é outro
   aparelho. É bloqueio por MAC: quem sabe a senha e troca o endereço (MAC aleatório) entra de novo; nesse caso, trocar a
   senha do Wi-Fi.
+- **Nomes e IP fixo:** `?a=name&mac=…&name=…`, `?a=static_set&mac=…&ip=…`, `?a=static_del&mac=…` (só POST).
+  Nomes no banco SQLite da Xiaomi (`/etc/xqDb`, tabela `DEVICE_INFO`: `NICKNAME` = dado pelo usuário, `ONAME` = o que o
+  aparelho informa), pelo módulo `lsqlite3` do Lua do roteador (não há `sqlite3` de linha de comando). IP fixo nos dois
+  lugares onde a Xiaomi grava: `/etc/config/macbind` (a lista da tela) e `/etc/config/dhcp` (o que o `dnsmasq` usa),
+  seção = MAC sem ":", e `dnsmasq reload` (~1 s, ninguém cai). IP novo só vale quando o aparelho renova o DHCP.
 - **Portas:** os contadores e o reset são os mesmos do rodapé e da seção "Port status" da interface do roteador
   (`/etc/wanlink.base` e `/etc/wanlink/base.ethX`).

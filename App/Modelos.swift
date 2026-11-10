@@ -17,9 +17,14 @@ struct RespostaRoteador: Decodable {
     let acl: ACL
     /// MAC de quem fez o pedido (o próprio iPhone, quando está no Wi-Fi de casa).
     let me: String?
+    /// Nomes do banco da Xiaomi (MAC → nome dado pelo usuário e nome que o aparelho informa).
+    let names: [String: NomeXiaomi]
+    /// IPs fixos (a lista da tela "DHCP static IP assignment").
+    let fixos: [IPFixo]
 
     enum CodingKeys: String, CodingKey {
-        case sys, wan, wan6, ports, wifi, fdb, leases, arp, devices, acl, blocked, me
+        case sys, wan, wan6, ports, wifi, fdb, leases, arp, devices, acl, blocked, me, names
+        case fixos = "static"
     }
 
     init(from decoder: Decoder) throws {
@@ -41,7 +46,19 @@ struct RespostaRoteador: Decodable {
         }
         let m = (try? c.decode(String.self, forKey: .me)) ?? ""
         me = m.isEmpty ? nil : m.lowercased()
+        names = (try? c.decode([String: NomeXiaomi].self, forKey: .names)) ?? [:]
+        fixos = (try? c.decode([IPFixo].self, forKey: .fixos)) ?? []
     }
+}
+
+struct NomeXiaomi: Decodable {
+    let nick: String
+    let oname: String
+}
+
+struct IPFixo: Decodable {
+    let mac: String
+    let ip: String
 }
 
 struct ACL: Decodable {
@@ -195,6 +212,10 @@ struct Aparelho: Identifiable {
     var ip: String?
     var banda: Banda
     var porta: String?
+    /// Interface da porta (eth2, eth3…), para agrupar os aparelhos de cabo por porta.
+    var dev: String?
+    /// IP fixado no roteador (DHCP estático), se houver.
+    var ipFixo: String?
     var rssi: Int?
     var taxaTx: Int?
     var taxaRx: Int?

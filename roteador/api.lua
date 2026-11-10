@@ -2,7 +2,8 @@
 -- API do app Rede (AX3600). Chamada pelo nginx (porta 8077, /nm/api) via fcgi-cgi.
 -- O nginx já conferiu o token (cabeçalho X-NM-Token) antes de chegar aqui.
 -- Ações (?a=): all (padrão), reset&dev=ethX, reboot (só POST), wantest,
--- block&mac=…, unblock&mac=…, snapshot e mode&m=allow|deny (só POST): controle de acesso ao Wi-Fi.
+-- block&mac=…, unblock&mac=…, snapshot e mode&m=allow|deny (só POST): controle de acesso ao Wi-Fi;
+-- name&mac=…&name=…, static_set&mac=…&ip=… e static_del&mac=… (só POST): nomes e IP fixo.
 
 local function rd(p)
   local f = io.open(p, "r")
@@ -430,6 +431,137 @@ local function chip_json()
   return "{" .. table.concat(t, ",") .. "}"
 end
 
+-- nomes dos aparelhos e IP fixo (os mesmos da tela "DHCP static IP assignment") ---
+-- Nomes: banco SQLite da Xiaomi (/etc/xqDb, tabela DEVICE_INFO: MAC em maiúsculas, ONAME = nome que o
+-- aparelho informa, NICKNAME = nome dado pelo usuário). IP fixo: a Xiaomi grava a mesma entrada em
+-- /etc/config/macbind (a lista da tela) e em /etc/config/dhcp (o que o dnsmasq usa), seção = MAC sem ":".
+local XQDB = "/etc/xqDb"
+
+local function opendb()
+  local ok, sq = pcall(require, "lsqlite3")
+  if not ok then return nil end
+  local db = sq.open(XQDB)
+  if db and db.busy_timeout then db:busy_timeout(3000) end
+  return db
+end
+
+local function names_json()
+  local db = opendb()
+  if not db then return "{}" end
+  local t = {}
+  for r in db:nrows("SELECT MAC, ONAME, NICKNAME FROM DEVICE_INFO") do
+    local mac = valid_mac(r.MAC)
+    if mac then
+      t[#t + 1] = q(mac) .. ':{"nick":' .. q(r.NICKNAME or "") .. ',"oname":' .. q(r.ONAME or "") .. "}"
+    end
+  end
+  db:close()
+  return "{" .. table.concat(t, ",") .. "}"
+end
+
+-- { mac = seção } de um arquivo do uci (dhcp ou macbind), só as entradas "host"
+local function host_sections(conf)
+  local sec = {}
+  local tipo = {}
+  local out = sh("uci -q show " .. conf)
+  for name, ty in out:gmatch(conf .. "%.([%w_]+)=(%w+)\n") do tipo[name] = ty end
+  for name, mac in out:gmatch(conf .. "%.([%w_]+)%.mac='([^']+)'") do
+    local m = valid_mac(mac)
+    if m and tipo[name] == "host" then sec[m] = name end
+  end
+  return sec, out
+end
+
+local function static_json()
+  local t, vistos = {}, {}
+  for _, conf in ipairs({"macbind", "dhcp"}) do
+    local sec, out = host_sections(conf)
+    for mac, name in pairs(sec) do
+      if not vistos[mac] then
+        local ip = out:match(conf .. "%." .. name:gsub("%p", "%%%0") .. "%.ip='([^']+)'")
+        if ip then
+          vistos[mac] = true
+          t[#t + 1] = '{"mac":' .. q(mac) .. ',"ip":' .. q(ip) .. "}"
+        end
+      end
+    end
+  end
+  return "[" .. table.concat(t, ",") .. "]"
+end
+
+local function urldecode(v)
+  v = (v or ""):gsub("%+", " ")
+  v = v:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+  return v
+end
+
+local function set_name(mac, name)
+  name = name:gsub("[%z\1-\31\127]", ""):match("^%s*(.-)%s*$")
+  if #name > 48 then name = name:sub(1, 48) end
+  local db = opendb()
+  if not db then return false, "Banco de nomes indisponível." end
+  local MAC = mac:upper()
+  local st = db:prepare("UPDATE DEVICE_INFO SET NICKNAME = ? WHERE MAC = ?")
+  st:bind_values(name, MAC)
+  st:step()
+  st:finalize()
+  if db:changes() == 0 then
+    st = db:prepare("INSERT INTO DEVICE_INFO (MAC, ONAME, NICKNAME, COMPANY, OWNNERID) VALUES (?, '', ?, '', '')")
+    st:bind_values(MAC, name)
+    st:step()
+    st:finalize()
+  end
+  db:close()
+  return true
+end
+
+local function lan_prefix()
+  local ip = sh("uci -q get network.lan.ipaddr"):match("(%d+%.%d+%.%d+%.)%d+")
+  return ip or "10.0.0."
+end
+
+local function reload_dhcp()
+  ex("uci commit dhcp; uci commit macbind; /etc/init.d/dnsmasq reload >/dev/null 2>&1")
+end
+
+local function set_static(mac, ip)
+  local pre = lan_prefix()
+  local last = tonumber((ip or ""):match("^" .. pre:gsub("%.", "%%.") .. "(%d+)$") or "")
+  if not last or last < 2 or last > 254 then
+    return false, "IP fora da rede de casa (use " .. pre .. "2 a " .. pre .. "254)."
+  end
+  if ip == sh("uci -q get network.lan.ipaddr"):match("(%S+)") then
+    return false, "Esse é o IP do roteador."
+  end
+  -- IP já fixado para outro aparelho?
+  local _, out = host_sections("dhcp")
+  for name, outro in out:gmatch("dhcp%.([%w_]+)%.ip='([^']+)'") do
+    local m = out:match("dhcp%." .. name .. "%.mac='([^']+)'")
+    if outro == ip and m and valid_mac(m) ~= mac then
+      return false, "O IP " .. ip .. " já está fixado para outro aparelho (" .. m .. ")."
+    end
+  end
+  for _, conf in ipairs({"dhcp", "macbind"}) do
+    local sec = host_sections(conf)
+    local name = sec[mac] or mac:gsub(":", "")
+    ex("uci set " .. conf .. "." .. name .. "=host")
+    ex("uci set " .. conf .. "." .. name .. ".mac=" .. mac)
+    ex("uci set " .. conf .. "." .. name .. ".ip=" .. ip)
+    ex("uci set " .. conf .. "." .. name .. ".name=" .. mac:gsub(":", ""))
+  end
+  reload_dhcp()
+  return true
+end
+
+local function del_static(mac)
+  for _, conf in ipairs({"dhcp", "macbind"}) do
+    local sec = host_sections(conf)
+    if sec[mac] then ex("uci -q delete " .. conf .. "." .. sec[mac]) end
+  end
+  reload_dhcp()
+  return true
+end
+
 local function all_json()
   local acl_text, deny_text = acl_json()
   return "{" ..
@@ -446,6 +578,8 @@ local function all_json()
     ',"acl":' .. acl_text ..
     ',"blocked":' .. deny_text ..
     ',"me":' .. q(requester() or "") ..
+    ',"names":' .. names_json() ..
+    ',"static":' .. static_json() ..
     "}"
 end
 
@@ -529,6 +663,23 @@ elseif a == "reboot" then
   end
 elseif a == "wantest" then
   wantest()
+elseif a == "name" or a == "static_set" or a == "static_del" then
+  local mac = valid_mac(Q.mac)
+  if METHOD ~= "POST" then
+    out("405 Method Not Allowed", '{"error":"POST"}')
+  elseif not mac then
+    out("400 Bad Request", '{"error":"mac"}')
+  else
+    local ok, err
+    if a == "name" then
+      ok, err = set_name(mac, urldecode(Q.name))
+    elseif a == "static_set" then
+      ok, err = set_static(mac, urldecode(Q.ip))
+    else
+      ok, err = del_static(mac)
+    end
+    if ok then out("200 OK", '{"ok":true}') else out("409 Conflict", '{"error":' .. q(err) .. "}") end
+  end
 elseif a == "block" or a == "unblock" or a == "snapshot" or a == "mode" then
   if METHOD ~= "POST" then
     out("405 Method Not Allowed", '{"error":"POST"}')

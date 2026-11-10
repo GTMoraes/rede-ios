@@ -100,6 +100,28 @@ final class Estado {
         await acaoAcesso("a=\(bloquear ? "block" : "unblock")&mac=\(mac)")
     }
 
+    /// Nome no roteador (o mesmo da tela de IP fixo e do app Mi WiFi). Vazio volta ao nome que o aparelho informa.
+    func salvarNome(mac: String, nome: String) async -> String? {
+        let n = nome.trimmingCharacters(in: .whitespacesAndNewlines)
+        let erro = await acaoAcesso("a=name&mac=\(mac)&name=\(Estado.codificar(n))")
+        if erro == nil, nomes[mac] != nil { renomear(mac: mac, para: "") }  // o nome antigo, só do app, sai
+        return erro
+    }
+
+    func fixarIP(mac: String, ip: String) async -> String? {
+        await acaoAcesso("a=static_set&mac=\(mac)&ip=\(Estado.codificar(ip))")
+    }
+
+    func desafixarIP(mac: String) async -> String? {
+        await acaoAcesso("a=static_del&mac=\(mac)")
+    }
+
+    /// Codifica para a URL: só letras e números ASCII passam; o resto (espaço, +, acentos) vira %XX.
+    static func codificar(_ s: String) -> String {
+        let ok = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~")
+        return s.addingPercentEncoding(withAllowedCharacters: ok) ?? ""
+    }
+
     /// Autoriza todos os aparelhos conectados agora no Wi-Fi.
     func autorizarConectados() async -> String? {
         await acaoAcesso("a=snapshot")
@@ -110,6 +132,13 @@ final class Estado {
     }
 
     var acl: ACL? { dados?.acl }
+
+    /// Conectados no Wi-Fi agora que ainda não estão na lista de autorizados.
+    var naoAutorizados: [Aparelho] {
+        guard let acl else { return [] }
+        let autorizados = Set(acl.allow)
+        return aparelhos.filter { ($0.banda == .g5 || $0.banda == .g2) && !autorizados.contains($0.mac) }
+    }
 
     /// Conectados no Wi-Fi agora que ficariam de fora se o modo "só autorizados" fosse ligado com a lista atual.
     var ficariamDeFora: [Aparelho] {
@@ -153,20 +182,32 @@ final class Estado {
         var traffic: [String: DispositivoTraffic] = [:]
         for (k, v) in d.devices ?? [:] { traffic[k.lowercased()] = v }
 
+        var fixoPorMac: [String: String] = [:]
+        for f in d.fixos { fixoPorMac[f.mac.lowercased()] = f.ip }
+
+        /// Nome que o aparelho informa (DHCP, banco da Xiaomi ou trafficd), sem o dado pelo usuário.
         func nomeRede(_ mac: String) -> String {
             let semPontos = mac.replacingOccurrences(of: ":", with: "")
-            for candidato in [nomePorMac[mac], traffic[mac]?.hostname] {
+            for candidato in [nomePorMac[mac], d.names[mac]?.oname, traffic[mac]?.hostname] {
                 if let c = candidato, !c.isEmpty, c.lowercased() != semPontos { return c }
             }
             return ""
+        }
+
+        /// Nome dado pelo usuário (no app, antigo, ou no roteador).
+        func apelido(_ mac: String) -> String? {
+            if let n = nomes[mac], !n.isEmpty { return n }
+            if let n = d.names[mac]?.nick, !n.isEmpty { return n }
+            return nil
         }
 
         func montar(_ mac: String, banda: Banda) -> Aparelho {
             let t = traffic[mac]
             let rede = nomeRede(mac)
             let ip = ipPorMac[mac] ?? t?.ip_list?.first?.ip
-            var a = Aparelho(mac: mac, nome: nomes[mac] ?? (rede.isEmpty ? "Sem nome" : rede),
+            var a = Aparelho(mac: mac, nome: apelido(mac) ?? (rede.isEmpty ? "Sem nome" : rede),
                              nomeRede: rede, ip: ip, banda: banda)
+            a.ipFixo = fixoPorMac[mac]
             a.baixando = t?.ip_list?.first?.tx_rate
             a.enviando = t?.ip_list?.first?.rx_rate
             if let o = t?.online_timer, banda == .cabo { a.conectado = Fmt.duracao(o) }
@@ -202,6 +243,7 @@ final class Estado {
                 a.porta = f.dev
             }
             a.online = true
+            a.dev = f.dev
             lista.append(a)
         }
         // aba Controle: a lista que vale agora (bloqueados ou autorizados), conectados ou não

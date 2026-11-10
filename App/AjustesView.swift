@@ -55,9 +55,9 @@ struct AjustesView: View {
                 }
 
                 Section {
-                    LabeledContent("Aparelhos renomeados", value: "\(estado.nomes.count)")
+                    LabeledContent("Nomes guardados só neste iPhone", value: "\(estado.nomes.count)")
                     if !estado.nomes.isEmpty {
-                        Button("Esquecer os nomes dados no app", role: .destructive) {
+                        Button("Esquecer esses nomes (ficam os do roteador)", role: .destructive) {
                             for mac in estado.nomes.keys { estado.renomear(mac: mac, para: "") }
                         }
                     }

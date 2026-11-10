@@ -4,8 +4,7 @@ import UIKit
 struct AparelhosView: View {
     @Environment(Estado.self) private var estado
     @State private var banda: Banda = .g5
-    @State private var renomeando: Aparelho?
-    @State private var novoNome = ""
+    @State private var editando: Aparelho?
     @State private var busca = ""
     /// Linhas que acabaram de ser arrastadas até o fim: saem da tela enquanto o roteador aplica.
     @State private var saindo = Set<String>()
@@ -13,6 +12,8 @@ struct AparelhosView: View {
     @State private var perguntandoLigar = false
     @State private var perguntandoDesligar = false
     @State private var ocupado = false
+    /// Portas recolhidas na aba Cabo (por padrão, todas abertas).
+    @State private var fechadas = Set<String>()
 
     var body: some View {
         NavigationStack {
@@ -42,7 +43,30 @@ struct AparelhosView: View {
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 4, trailing: 20))
 
-                ForEach(lista) { a in
+                if banda == .cabo {
+                    ForEach(grupos(lista)) { g in
+                        let aberta = !fechadas.contains(g.dev) || !busca.isEmpty
+                        LinhaPorta(g: g, aberta: aberta)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                            .onTapGesture {
+                                withAnimation(.snappy) { alternarPorta(g.dev) }
+                            }
+                        if aberta {
+                            ForEach(g.filhos) { a in
+                                LinhaAparelho(a: a, filho: true)
+                                    .listRowBackground(Color.clear)
+                                    .listRowSeparator(.hidden)
+                                    .listRowInsets(EdgeInsets(top: 4, leading: 40, bottom: 4, trailing: 16))
+                                    .contextMenu { menu(a) }
+                                    .onTapGesture { editando = a }
+                            }
+                        }
+                    }
+                }
+
+                ForEach(banda == .cabo ? [] : lista) { a in
                     LinhaAparelho(a: a)
                         .offset(x: saindo.contains(a.mac) ? -700 : 0)
                         .opacity(saindo.contains(a.mac) ? 0 : 1)
@@ -61,10 +85,7 @@ struct AparelhosView: View {
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                         .contextMenu { menu(a) }
-                        .onTapGesture {
-                            novoNome = estado.nomes[a.mac] ?? ""
-                            renomeando = a
-                        }
+                        .onTapGesture { editando = a }
                 }
             }
             .listStyle(.plain)
@@ -73,15 +94,8 @@ struct AparelhosView: View {
             .refreshable { await estado.atualizar() }
             .navigationTitle("Aparelhos")
             .telaEscura()
-            .alert("Nome no app", isPresented: Binding(get: { renomeando != nil },
-                                                     set: { if !$0 { renomeando = nil } })) {
-                TextField(renomeando?.nomeRede.isEmpty == false ? renomeando!.nomeRede : "Nome", text: $novoNome)
-                Button("Salvar") {
-                    if let a = renomeando { estado.renomear(mac: a.mac, para: novoNome) }
-                }
-                Button("Cancelar", role: .cancel) {}
-            } message: {
-                Text("Fica só neste iPhone. Deixe vazio para voltar ao nome que o aparelho informa.")
+            .sheet(item: $editando) { a in
+                EditarAparelhoView(a: a)
             }
             .alert("Wi-Fi", isPresented: Binding(get: { aviso != nil }, set: { if !$0 { aviso = nil } })) {
                 Button("OK", role: .cancel) {}
@@ -90,7 +104,7 @@ struct AparelhosView: View {
             }
             .confirmationDialog("Ligar \"só autorizados\"?", isPresented: $perguntandoLigar,
                                 titleVisibility: .visible) {
-                Button("Autorizar os \(conectadosWifi) conectados e ligar") {
+                Button(estado.naoAutorizados.isEmpty ? "Ligar" : "Autorizar os \(estado.naoAutorizados.count) que faltam e ligar") {
                     executar { await estado.autorizarConectados() } depois: { await estado.definirSoAutorizados(true) }
                 }
                 if (estado.acl?.allow.count ?? 0) > 0 {
@@ -137,14 +151,19 @@ struct AparelhosView: View {
                 .font(.caption)
                 .foregroundStyle(Tema.texto2)
 
+            let novos = estado.naoAutorizados.count
             Button {
-                executar { await estado.autorizarConectados() }
+                executar({ await estado.autorizarConectados() }, sucesso: "\(novos) autorizado\(novos == 1 ? "" : "s").")
             } label: {
-                Label("Autorizar os \(conectadosWifi) conectados agora", systemImage: "person.badge.plus")
+                Label(novos == 0
+                      ? "Todos os \(conectadosWifi) conectados estão autorizados"
+                      : "Autorizar \(novos) de \(conectadosWifi) conectados",
+                      systemImage: novos == 0 ? "checkmark.seal.fill" : "person.badge.plus")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.glass)
-            .disabled(ocupado || acl == nil)
+            .tint(novos == 0 ? Tema.verde : Tema.acento)
+            .disabled(ocupado || acl == nil || novos == 0)
 
             if ocupado {
                 ProgressView().frame(maxWidth: .infinity)
@@ -169,13 +188,39 @@ struct AparelhosView: View {
     }
 
     private func executar(_ passo: @escaping () async -> String?,
-                          depois: (() async -> String?)? = nil) {
+                          depois: (() async -> String?)? = nil,
+                          sucesso: String? = nil) {
         ocupado = true
         Task {
             var erro = await passo()
             if erro == nil, let depois { erro = await depois() }
             ocupado = false
-            if let erro { aviso = erro }
+            if let erro { aviso = erro } else if let sucesso { aviso = sucesso }
+        }
+    }
+
+    // MARK: árvore da aba Cabo (porta → aparelhos)
+
+    struct Grupo: Identifiable {
+        var dev: String
+        var porta: Porta?
+        var filhos: [Aparelho]
+        var id: String { dev }
+    }
+
+    private func alternarPorta(_ dev: String) {
+        if fechadas.contains(dev) {
+            _ = fechadas.remove(dev)
+        } else {
+            _ = fechadas.insert(dev)
+        }
+    }
+
+    private func grupos(_ lista: [Aparelho]) -> [Grupo] {
+        var porDev: [String: [Aparelho]] = [:]
+        for a in lista { porDev[a.dev ?? "?", default: []].append(a) }
+        return porDev.keys.sorted().map { dev in
+            Grupo(dev: dev, porta: estado.porta(dev: dev), filhos: porDev[dev] ?? [])
         }
     }
 
@@ -204,10 +249,9 @@ struct AparelhosView: View {
     @ViewBuilder
     private func menu(_ a: Aparelho) -> some View {
         Button {
-            novoNome = estado.nomes[a.mac] ?? ""
-            renomeando = a
+            editando = a
         } label: {
-            Label("Renomear", systemImage: "pencil")
+            Label("Nome e IP fixo", systemImage: "pencil")
         }
         if let ip = a.ip {
             Button {
@@ -255,7 +299,7 @@ struct AparelhosView: View {
             if so { return n == 0 ? "Nenhum autorizado." : "Autorizados (\(n)). Arraste para a esquerda para remover." }
             return n == 0 ? "Nenhum aparelho bloqueado." : "Bloqueados (\(n)). Arraste para a esquerda para desbloquear."
         case .cabo:
-            return "\(n) por cabo. Inclui os aparelhos atrás do roteador IoT (LAN1) e as máquinas virtuais do GT-SRV."
+            return "\(n) por cabo, agrupados pela porta. Toque numa porta para mostrar ou esconder os aparelhos."
         case .g5, .g2:
             if estado.dados == nil { return "Sem dados do roteador." }
             return "\(n) conectados. Arraste para a esquerda para bloquear no Wi-Fi."
@@ -273,8 +317,51 @@ struct AparelhosView: View {
     }
 }
 
+/// Linha "pai" da aba Cabo: a porta, com quantos aparelhos estão atrás dela.
+struct LinhaPorta: View {
+    let g: AparelhosView.Grupo
+    let aberta: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .rotationEffect(.degrees(aberta ? 90 : 0))
+                .foregroundStyle(Tema.texto2)
+                .frame(width: 14)
+            Image(systemName: "cable.connector.horizontal")
+                .font(.title3)
+                .foregroundStyle(Tema.acento)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(titulo).font(.body.weight(.semibold))
+                Text("\(g.filhos.count) aparelho\(g.filhos.count == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundStyle(Tema.texto2)
+            }
+            Spacer()
+            if let p = g.porta, p.up {
+                HStack(spacing: 6) {
+                    Bolinha(cor: Tema.corVelocidade(p.speed))
+                    Text("\(p.speed.map { "\($0)" } ?? "?") Mb/s")
+                        .font(.subheadline.monospacedDigit())
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
+        .contentShape(Rectangle())
+    }
+
+    private var titulo: String {
+        guard let p = g.porta else { return g.dev }
+        return p.label.isEmpty ? p.port : "\(p.port) · \(p.label)"
+    }
+}
+
 struct LinhaAparelho: View {
     let a: Aparelho
+    var filho = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -296,11 +383,16 @@ struct LinhaAparelho: View {
                     .font(.body.weight(.semibold))
                     .foregroundStyle(a.nome == "Sem nome" ? Tema.texto2 : .primary)
                     .lineLimit(1)
-                Text([a.ip, a.mac].compactMap { $0 }.joined(separator: " · "))
-                    .font(.caption.monospaced())
-                    .foregroundStyle(Tema.texto2)
-                    .lineLimit(1)
-                if let porta = a.porta {
+                HStack(spacing: 4) {
+                    if a.ipFixo != nil {
+                        Image(systemName: "pin.fill").font(.caption2).foregroundStyle(Tema.acento)
+                    }
+                    Text([a.ip ?? a.ipFixo, a.mac].compactMap { $0 }.joined(separator: " · "))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(Tema.texto2)
+                        .lineLimit(1)
+                }
+                if let porta = a.porta, !filho {
                     Text(porta).font(.caption).foregroundStyle(Tema.texto2)
                 }
                 if let c = a.conectado {
@@ -328,9 +420,9 @@ struct LinhaAparelho: View {
                 }
             }
         }
-        .padding(14)
+        .padding(filho ? 11 : 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 20))
+        .glassEffect(.regular, in: .rect(cornerRadius: filho ? 16 : 20))
         .contentShape(Rectangle())
     }
 
