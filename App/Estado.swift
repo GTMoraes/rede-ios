@@ -83,6 +83,41 @@ final class Estado {
                                    Rede.pedido(Rede.url(srv, "/wantest?secs=8"), timeout: 75, token: false))
     }
 
+    /// Ações do controle de acesso ao Wi-Fi. Devolvem a mensagem de erro, ou nil se deu certo.
+    private func acaoAcesso(_ consulta: String) async -> String? {
+        guard let base = enderecos?.roteador else { return "Roteador não encontrado." }
+        do {
+            _ = try await Rede.dados(Rede.pedido(Rede.url(base, "/api?\(consulta)"), metodo: "POST", timeout: 20))
+            await atualizar()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// Bloqueia (ou libera). No modo "só autorizados", bloquear = tirar da lista de autorizados.
+    func bloquear(mac: String, _ bloquear: Bool = true) async -> String? {
+        await acaoAcesso("a=\(bloquear ? "block" : "unblock")&mac=\(mac)")
+    }
+
+    /// Autoriza todos os aparelhos conectados agora no Wi-Fi.
+    func autorizarConectados() async -> String? {
+        await acaoAcesso("a=snapshot")
+    }
+
+    func definirSoAutorizados(_ sim: Bool) async -> String? {
+        await acaoAcesso("a=mode&m=\(sim ? "allow" : "deny")")
+    }
+
+    var acl: ACL? { dados?.acl }
+
+    /// Conectados no Wi-Fi agora que ficariam de fora se o modo "só autorizados" fosse ligado com a lista atual.
+    var ficariamDeFora: [Aparelho] {
+        guard let acl else { return [] }
+        let autorizados = Set(acl.allow)
+        return aparelhos.filter { ($0.banda == .g5 || $0.banda == .g2) && !$0.euMesmo && !autorizados.contains($0.mac) }
+    }
+
     func renomear(mac: String, para nome: String) {
         let n = nome.trimmingCharacters(in: .whitespacesAndNewlines)
         if n.isEmpty { nomes[mac] = nil } else { nomes[mac] = n }
@@ -139,7 +174,10 @@ final class Estado {
         }
 
         var lista: [Aparelho] = []
-        var vistos = Set<String>()
+        let eu = d.me
+        // bloqueado que ainda aparece conectado (o chip leva um instante para derrubar) não entra nas bandas
+        var vistos = d.acl.soAutorizados ? Set<String>() : Set(d.acl.deny)
+        var conectados = Set<String>()
         for (banda, clientes) in [(Banda.g5, d.wifi.g5), (Banda.g2, d.wifi.g2)] {
             for c in clientes where !vistos.contains(c.mac) {
                 vistos.insert(c.mac)
@@ -149,6 +187,9 @@ final class Estado {
                 a.taxaRx = c.rx
                 a.conectado = c.assoc
                 a.modo = c.mode
+                a.online = true
+                a.euMesmo = c.mac == eu
+                conectados.insert(c.mac)
                 lista.append(a)
             }
         }
@@ -160,6 +201,14 @@ final class Estado {
             } else {
                 a.porta = f.dev
             }
+            a.online = true
+            lista.append(a)
+        }
+        // aba Controle: a lista que vale agora (bloqueados ou autorizados), conectados ou não
+        for mac in d.acl.ativa {
+            var a = montar(mac, banda: .controle)
+            a.online = conectados.contains(mac)
+            a.euMesmo = mac == eu
             lista.append(a)
         }
         return lista.sorted {

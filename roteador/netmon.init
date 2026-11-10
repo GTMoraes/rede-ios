@@ -15,8 +15,11 @@ reload_nginx() {
 
 start() {
 	mkdir -p /tmp/netmon /www/cgi-bin
+	# arquivo REAL de 8 MB (o app baixa várias vezes). Não usar arquivo esparso: no kernel 4.4 do
+	# roteador, o sendfile de um arquivo esparso em tmpfs ocupa RAM de verdade (256 MB travaram o roteador
+	# em 10/11/2026).
 	[ -f /tmp/netmon/blob ] || \
-		dd if=/dev/zero of=/tmp/netmon/blob bs=1 count=0 seek=268435456 2>/dev/null
+		dd if=/dev/zero of=/tmp/netmon/blob bs=1M count=8 2>/dev/null
 	chmod 755 $D/api.lua
 	ln -sf $D/api.lua /www/cgi-bin/netmon
 	[ -s $D/token ] || openssl rand -hex 16 > $D/token

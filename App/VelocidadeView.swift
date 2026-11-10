@@ -66,25 +66,36 @@ struct VelocidadeView: View {
     @AppStorage("resultados") private var guardados: Data = Data()
     @State private var resultados: [String: Resultado] = [:]
     @State private var rodando: TipoTeste?
+    /// Cartão do topo: o teste em andamento e, depois, o último medido (com o resultado).
+    @State private var destaque: TipoTeste?
     @State private var fase = ""
     @State private var aoVivo: Double = 0
     @State private var erro: String?
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                GlassEffectContainer(spacing: 14) {
-                    VStack(spacing: 14) {
-                        if let rodando {
-                            painelAoVivo(rodando)
+            ScrollViewReader { rolagem in
+                ScrollView {
+                    GlassEffectContainer(spacing: 14) {
+                        VStack(spacing: 14) {
+                            Color.clear.frame(height: 0).id("topo")
+                            if let destaque {
+                                painelDestaque(destaque)
+                            }
+                            ForEach(TipoTeste.allCases) { t in
+                                cartao(t)
+                            }
+                            dica
                         }
-                        ForEach(TipoTeste.allCases) { t in
-                            cartao(t)
-                        }
-                        dica
+                        .padding(.horizontal)
+                        .padding(.bottom, 24)
                     }
-                    .padding(.horizontal)
-                    .padding(.bottom, 24)
+                }
+                // ao começar um teste, sobe para o cartão ao vivo
+                .onChange(of: rodando) { _, novo in
+                    if novo != nil {
+                        withAnimation(.snappy) { rolagem.scrollTo("topo", anchor: .top) }
+                    }
                 }
             }
             .navigationTitle("Velocidade")
@@ -100,22 +111,35 @@ struct VelocidadeView: View {
 
     // MARK: partes
 
-    private func painelAoVivo(_ t: TipoTeste) -> some View {
-        VStack(spacing: 6) {
-            Text(t.titulo).font(.subheadline).foregroundStyle(Tema.texto2)
-            if t.noIphone {
-                Text(Fmt.mbps(aoVivo))
-                    .font(.system(size: 56, weight: .bold, design: .rounded).monospacedDigit())
-                    .contentTransition(.numericText())
-                    .animation(.snappy, value: aoVivo)
-                Text("Mb/s · \(fase)").font(.subheadline).foregroundStyle(Tema.texto2)
-            } else {
-                ProgressView().controlSize(.large).padding(.vertical, 8)
-                Text(fase).font(.subheadline).foregroundStyle(Tema.texto2)
+    private func painelDestaque(_ t: TipoTeste) -> some View {
+        VStack(spacing: 10) {
+            Label(t.titulo, systemImage: t.icone)
+                .font(.headline)
+            if rodando == t {
+                if t.noIphone {
+                    Text(Fmt.mbps(aoVivo))
+                        .font(.system(size: 56, weight: .bold, design: .rounded).monospacedDigit())
+                        .contentTransition(.numericText())
+                        .animation(.snappy, value: aoVivo)
+                    Text("Mb/s · \(fase)").font(.subheadline).foregroundStyle(Tema.texto2)
+                } else {
+                    ProgressView().controlSize(.large).padding(.vertical, 8)
+                    Text(fase).font(.subheadline).foregroundStyle(Tema.texto2)
+                }
+            } else if let r = resultados[t.rawValue] {
+                HStack(alignment: .top) {
+                    metrica("Download", Fmt.mbps(r.down), "Mb/s", "arrow.down.circle", grande: true)
+                    metrica("Upload", Fmt.mbps(r.up), "Mb/s", "arrow.up.circle", grande: true)
+                    metrica("Latência", numeroMs(r.ping), "ms", "timer", grande: true)
+                }
+                Text("Medido às \(r.quando.formatted(date: .omitted, time: .shortened))")
+                    .font(.caption)
+                    .foregroundStyle(Tema.texto2)
             }
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 20)
+        .padding(.horizontal, 12)
         .glassEffect(.regular.tint(Tema.acento.opacity(0.25)), in: .rect(cornerRadius: 28))
     }
 
@@ -124,14 +148,10 @@ struct VelocidadeView: View {
         let indisponivel = motivoIndisponivel(t)
         return Cartao(titulo: t.titulo, icone: t.icone) {
             Text(t.detalhe).font(.caption).foregroundStyle(Tema.texto2)
-            HStack {
-                numero("Download", r?.down, "arrow.down.circle")
-                numero("Upload", r?.up, "arrow.up.circle")
-                VStack(spacing: 2) {
-                    Text(Fmt.ms(r?.ping)).font(.title3.weight(.semibold).monospacedDigit())
-                    Label("Latência", systemImage: "timer").font(.caption2).foregroundStyle(Tema.texto2)
-                }
-                .frame(maxWidth: .infinity)
+            HStack(alignment: .top) {
+                metrica("Download", Fmt.mbps(r?.down), "Mb/s", "arrow.down.circle")
+                metrica("Upload", Fmt.mbps(r?.up), "Mb/s", "arrow.up.circle")
+                metrica("Latência", numeroMs(r?.ping), "ms", "timer")
             }
             if let r {
                 Text("Medido \(r.quando.formatted(date: .abbreviated, time: .shortened))")
@@ -152,12 +172,20 @@ struct VelocidadeView: View {
         }
     }
 
-    private func numero(_ rotulo: String, _ v: Double?, _ icone: String) -> some View {
+    private func metrica(_ rotulo: String, _ valor: String, _ unidade: String, _ icone: String,
+                         grande: Bool = false) -> some View {
         VStack(spacing: 2) {
-            Text(Fmt.mbps(v)).font(.title3.weight(.semibold).monospacedDigit())
+            Text(valor)
+                .font(grande ? Font.title.weight(.bold).monospacedDigit() : Font.title3.weight(.semibold).monospacedDigit())
+            Text(unidade).font(.caption2).foregroundStyle(Tema.texto2)
             Label(rotulo, systemImage: icone).font(.caption2).foregroundStyle(Tema.texto2)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private func numeroMs(_ v: Double?) -> String {
+        guard let v, v.isFinite else { return "—" }
+        return String(format: "%.0f", v)
     }
 
     private var dica: some View {
@@ -186,6 +214,7 @@ struct VelocidadeView: View {
     // MARK: medição
 
     private func rodar(_ t: TipoTeste) async {
+        destaque = t
         rodando = t
         aoVivo = 0
         estado.pausado = true
@@ -225,6 +254,7 @@ struct VelocidadeView: View {
             salvar()
         } catch {
             erro = error.localizedDescription
+            if resultados[t.rawValue] == nil { destaque = nil }
         }
     }
 

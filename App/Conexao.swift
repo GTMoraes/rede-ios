@@ -72,6 +72,10 @@ struct Enderecos {
     var modo: Modo
 }
 
+private struct ErroAPI: Decodable {
+    let error: String
+}
+
 enum Rede {
     static let sessao: URLSession = {
         let c = URLSessionConfiguration.ephemeral
@@ -98,6 +102,10 @@ enum Rede {
         let (d, resp) = try await sessao.data(for: r)
         guard let h = resp as? HTTPURLResponse else { throw ErroApp("Resposta inválida.") }
         if h.statusCode == 403 { throw ErroApp("O roteador recusou o token. Confira em Ajustes.") }
+        // a API devolve {"error": "..."}; frases vão direto para a tela
+        if let e = try? JSONDecoder().decode(ErroAPI.self, from: d), e.error.count > 12 {
+            throw ErroApp(e.error)
+        }
         if h.statusCode == 409 { throw ErroApp("Já há um teste em andamento. Tente de novo em instantes.") }
         guard (200..<300).contains(h.statusCode) else { throw ErroApp("O servidor respondeu HTTP \(h.statusCode).") }
         return d

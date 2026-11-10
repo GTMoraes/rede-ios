@@ -131,7 +131,7 @@ struct PainelView: View {
         let lista = estado.aparelhos
         return Cartao(titulo: "Aparelhos conectados", icone: "laptopcomputer.and.iphone") {
             HStack {
-                ForEach(Banda.allCases) { b in
+                ForEach([Banda.g5, .g2, .cabo]) { b in
                     VStack(spacing: 4) {
                         Text("\(lista.filter { $0.banda == b }.count)")
                             .font(.title2.weight(.bold).monospacedDigit())
@@ -141,6 +141,12 @@ struct PainelView: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
+            }
+            if let acl = estado.acl {
+                LinhaInfo(rotulo: "Acesso ao Wi-Fi",
+                          valor: acl.soAutorizados ? "Só autorizados (\(acl.allow.count))"
+                                                   : "Lista de bloqueio (\(acl.deny.count))",
+                          cor: acl.soAutorizados ? Tema.verde : .primary)
             }
         }
     }

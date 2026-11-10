@@ -1,7 +1,8 @@
 #!/usr/bin/lua
 -- API do app Rede (AX3600). Chamada pelo nginx (porta 8077, /nm/api) via fcgi-cgi.
 -- O nginx já conferiu o token (cabeçalho X-NM-Token) antes de chegar aqui.
--- Ações (?a=): all (padrão), reset&dev=ethX, reboot (só POST), wantest.
+-- Ações (?a=): all (padrão), reset&dev=ethX, reboot (só POST), wantest,
+-- block&mac=…, unblock&mac=…, snapshot e mode&m=allow|deny (só POST): controle de acesso ao Wi-Fi.
 
 local function rd(p)
   local f = io.open(p, "r")
@@ -234,7 +235,203 @@ local function sys_json()
     ',"time":' .. os.time() .. "}"
 end
 
+-- controle de acesso ao Wi-Fi (lista de bloqueio OU só autorizados) --------
+-- O firmware aplica no boot wireless.@wifi-iface[0/1].maclist conforme macfilter ('deny' = bloqueia a lista,
+-- 'allow' = só a lista entra), pela lista "_sec" do chip (/lib/wifi/qcawificfg80211.sh). As duas listas ficam
+-- guardadas em /etc/netmon/acl_deny e /etc/netmon/acl_allow; a do modo ativo é copiada para o uci.
+-- Trocar de modo não derruba quem continua permitido: a lista do chip só vale para novas conexões, e o
+-- script derruba (kickmac) apenas quem ficou de fora.
+local WIFACES = { {0, "wl0"}, {1, "wl1"} }
+local ACLDIR = "/etc/netmon"
+
+local function wifitool()
+  local t = sh("which cfg80211tool"):match("(%S+)")
+  return t or "iwpriv"
+end
+
+local function uci_list(i)
+  local t = {}
+  for m in sh("uci -q get wireless.@wifi-iface[" .. i .. "].maclist"):gmatch("%S+") do
+    t[#t + 1] = m:lower()
+  end
+  return t
+end
+
+local function contains(list, x)
+  for _, v in ipairs(list) do if v == x then return true end end
+  return false
+end
+
+local function valid_mac(m)
+  m = (m or ""):lower():gsub("%%3a", ":")
+  if m:match("^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$") then return m end
+  return nil
+end
+
+local function mode()
+  local m = sh("uci -q get wireless.@wifi-iface[0].macfilter"):match("(%S+)")
+  if m == "allow" then return "allow" end
+  return "deny"
+end
+
+local function load_list(kind)
+  local f = io.open(ACLDIR .. "/acl_" .. kind, "r")
+  if not f then
+    -- primeira vez: a lista do modo ativo vem do uci
+    if mode() == kind then return uci_list(0) end
+    return {}
+  end
+  local t = {}
+  for l in f:lines() do
+    local m = valid_mac(l)
+    if m and not contains(t, m) then t[#t + 1] = m end
+  end
+  f:close()
+  return t
+end
+
+local function save_list(kind, list)
+  local f = io.open(ACLDIR .. "/acl_" .. kind, "w")
+  if not f then return end
+  for _, m in ipairs(list) do f:write(m, "\n") end
+  f:close()
+end
+
+local function without(list, x)
+  local t = {}
+  for _, v in ipairs(list) do if v ~= x then t[#t + 1] = v end end
+  return t
+end
+
+-- quem está conectado agora no Wi-Fi do AX3600: { mac = "wl0" }
+local function connected()
+  local c = {}
+  for _, w in ipairs(WIFACES) do
+    for line in sh("wlanconfig " .. w[2] .. " list sta"):gmatch("[^\n]+") do
+      local m = line:match("^(%x%x:%x%x:%x%x:%x%x:%x%x:%x%x)%s")
+      if m then c[m:lower()] = w[2] end
+    end
+  end
+  return c
+end
+
+-- MAC de quem fez o pedido (pela tabela ARP). Pela ponte do GT-SRV, é o GT-SRV (cabo).
+local function requester()
+  local ip = os.getenv("REMOTE_ADDR") or ""
+  for line in rdall("/proc/net/arp"):gmatch("[^\n]+") do
+    local a, m = line:match("^(%S+)%s+%S+%s+%S+%s+(%S+)")
+    if a == ip and m then return m:lower() end
+  end
+  return nil
+end
+
+-- grava o modo e a lista no uci e no chip, e derruba quem ficou de fora
+local function apply(md)
+  local list = load_list(md)
+  for _, w in ipairs(WIFACES) do
+    local sec = "wireless.@wifi-iface[" .. w[1] .. "]"
+    ex("uci -q delete " .. sec .. ".maclist")
+    for _, m in ipairs(list) do ex("uci add_list " .. sec .. ".maclist=" .. m) end
+    ex("uci set " .. sec .. ".macfilter=" .. md)
+  end
+  ex("uci commit wireless")
+  local T = wifitool()
+  for _, w in ipairs(WIFACES) do
+    local cmd = T .. " " .. w[2] .. " maccmd_sec 3"
+    for _, m in ipairs(list) do cmd = cmd .. "; " .. T .. " " .. w[2] .. " addmac_sec " .. m end
+    local code = (md == "allow") and "1" or ((#list > 0) and "2" or "0")
+    cmd = cmd .. "; " .. T .. " " .. w[2] .. " maccmd_sec " .. code
+    ex("( " .. cmd .. " ) >/dev/null 2>&1")
+  end
+  local kick = ""
+  for m, wl in pairs(connected()) do
+    local fora = (md == "allow" and not contains(list, m)) or (md == "deny" and contains(list, m))
+    if fora then kick = kick .. T .. " " .. wl .. " kickmac " .. m .. "; " end
+  end
+  if kick ~= "" then ex("( " .. kick .. ") >/dev/null 2>&1") end
+end
+
+local function acl_json()
+  local function arr(list)
+    local t = {}
+    for _, m in ipairs(list) do t[#t + 1] = q(m) end
+    return "[" .. table.concat(t, ",") .. "]"
+  end
+  local deny = load_list("deny")
+  return '{"mode":' .. q(mode()) .. ',"deny":' .. arr(deny) .. ',"allow":' .. arr(load_list("allow")) .. "}",
+    arr(deny)
+end
+
+-- ações (todas só por POST) -------------------------------------------------
+local function acl_action(a)
+  local me = requester()
+  local conn = connected()
+  local md = mode()
+  if a == "block" or a == "unblock" then
+    local mac = valid_mac(Q.mac)
+    if not mac then return "400 Bad Request", '{"error":"mac"}' end
+    if a == "block" and mac == me then
+      return "409 Conflict", '{"error":"Este é o aparelho que está usando o app."}'
+    end
+    if md == "allow" then
+      local allow = load_list("allow")
+      if a == "block" then allow = without(allow, mac)
+      elseif not contains(allow, mac) then allow[#allow + 1] = mac end
+      save_list("allow", allow)
+    else
+      local deny = load_list("deny")
+      if a == "block" then
+        if not contains(deny, mac) then deny[#deny + 1] = mac end
+      else
+        deny = without(deny, mac)
+      end
+      save_list("deny", deny)
+    end
+    apply(md)
+  elseif a == "snapshot" then
+    -- autoriza todos os conectados agora (soma à lista que já existe)
+    local allow = load_list("allow")
+    local deny = load_list("deny")
+    for m in pairs(conn) do
+      if not contains(allow, m) and not contains(deny, m) then allow[#allow + 1] = m end
+    end
+    save_list("allow", allow)
+    if md == "allow" then apply("allow") end
+  elseif a == "mode" then
+    local novo = Q.m
+    if novo ~= "allow" and novo ~= "deny" then return "400 Bad Request", '{"error":"m"}' end
+    if novo == "allow" then
+      local allow = load_list("allow")
+      -- quem está usando o app pelo Wi-Fi entra sempre, para não se trancar para fora
+      if me and conn[me] and not contains(allow, me) then allow[#allow + 1] = me end
+      if #allow == 0 then
+        return "409 Conflict", '{"error":"A lista de autorizados está vazia. Autorize os conectados primeiro."}'
+      end
+      save_list("allow", allow)
+    end
+    -- guarda as duas listas em arquivo antes de trocar (na primeira troca, a ativa vinha só do uci)
+    save_list("deny", load_list("deny"))
+    save_list("allow", load_list("allow"))
+    apply(novo)
+  end
+  local acl = acl_json()
+  return "200 OK", '{"ok":true,"acl":' .. acl .. "}"
+end
+
+local function chip_json()
+  local T = wifitool()
+  local t = {}
+  for _, w in ipairs(WIFACES) do
+    local out = sh(T .. " " .. w[2] .. " getmac_sec")
+    local macs = {}
+    for m in out:gmatch("(%x%x:%x%x:%x%x:%x%x:%x%x:%x%x)") do macs[#macs + 1] = q(m:lower()) end
+    t[#t + 1] = q(w[2]) .. ":[" .. table.concat(macs, ",") .. "]"
+  end
+  return "{" .. table.concat(t, ",") .. "}"
+end
+
 local function all_json()
+  local acl_text, deny_text = acl_json()
   return "{" ..
     '"v":1' ..
     ',"sys":' .. sys_json() ..
@@ -246,6 +443,9 @@ local function all_json()
     ',"leases":' .. leases_json() ..
     ',"arp":' .. arp_json() ..
     ',"devices":' .. raw(sh("ubus call trafficd hw")) ..
+    ',"acl":' .. acl_text ..
+    ',"blocked":' .. deny_text ..
+    ',"me":' .. q(requester() or "") ..
     "}"
 end
 
@@ -329,6 +529,16 @@ elseif a == "reboot" then
   end
 elseif a == "wantest" then
   wantest()
+elseif a == "block" or a == "unblock" or a == "snapshot" or a == "mode" then
+  if METHOD ~= "POST" then
+    out("405 Method Not Allowed", '{"error":"POST"}')
+  else
+    local st, body = acl_action(a)
+    if st == "200 OK" then
+      body = body:sub(1, -2) .. ',"chip":' .. chip_json() .. "}"
+    end
+    out(st, body)
+  end
 else
   out("400 Bad Request", '{"error":"a"}')
 end

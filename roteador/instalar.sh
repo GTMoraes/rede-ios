@@ -17,10 +17,14 @@ curl -s -o /dev/null -w "api sem token (esperado 403): %{http_code}\n" $B/api
 curl -s -H "$H" -o /tmp/netmon/t.json -w "api com token (esperado 200): %{http_code}\n" "$B/api?a=all"
 echo "inicio da resposta: $(head -c 120 /tmp/netmon/t.json)"
 rm -f /tmp/netmon/t.json
-curl -s -H "$H" -r 0-10485759 -o /dev/null \
-	-w "download 10 MB (esperado 10485760 206): %{size_download} %{http_code}\n" $B/dl
+curl -s -H "$H" -r 0-4194303 -o /dev/null \
+	-w "download 4 MB (esperado 4194304 206): %{size_download} %{http_code}\n" $B/dl
 dd if=/dev/zero bs=1M count=4 2>/dev/null | curl -s -H "$H" -H "Expect:" \
 	--data-binary @- -o /dev/null -w "upload 4 MB (esperado 4194304 204): %{size_upload} %{http_code}\n" $B/up
+curl -s -H "$H" -o /dev/null -w "bloqueio sem POST (esperado 405): %{http_code}\n" \
+	"$B/api?a=block&mac=00:00:00:00:00:00"
+echo "Wi-Fi: modo $(uci -q get wireless.@wifi-iface[0].macfilter), lista: $(uci -q get wireless.@wifi-iface[0].maclist)"
+free | sed -n 2p
 ls /etc/rc.d | grep netmon
 echo
 echo "TOKEN DO APP: $T"

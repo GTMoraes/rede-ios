@@ -13,9 +13,13 @@ struct RespostaRoteador: Decodable {
     let leases: [Concessao]
     let arp: [EntradaARP]
     let devices: [String: DispositivoTraffic]?
+    /// Controle de acesso ao Wi-Fi: modo ("deny" = lista de bloqueio, "allow" = só autorizados) e as duas listas.
+    let acl: ACL
+    /// MAC de quem fez o pedido (o próprio iPhone, quando está no Wi-Fi de casa).
+    let me: String?
 
     enum CodingKeys: String, CodingKey {
-        case sys, wan, wan6, ports, wifi, fdb, leases, arp, devices
+        case sys, wan, wan6, ports, wifi, fdb, leases, arp, devices, acl, blocked, me
     }
 
     init(from decoder: Decoder) throws {
@@ -29,8 +33,27 @@ struct RespostaRoteador: Decodable {
         wan = try? c.decode(WanStatus.self, forKey: .wan)
         wan6 = try? c.decode(WanStatus.self, forKey: .wan6)
         devices = try? c.decode([String: DispositivoTraffic].self, forKey: .devices)
+        if let a = try? c.decode(ACL.self, forKey: .acl) {
+            acl = a
+        } else {
+            let b = (try? c.decode([String].self, forKey: .blocked)) ?? []
+            acl = ACL(mode: "deny", allow: [], deny: b)
+        }
+        let m = (try? c.decode(String.self, forKey: .me)) ?? ""
+        me = m.isEmpty ? nil : m.lowercased()
     }
 }
+
+struct ACL: Decodable {
+    let mode: String
+    let allow: [String]
+    let deny: [String]
+    var soAutorizados: Bool { mode == "allow" }
+    /// A lista que vale agora (bloqueados ou autorizados).
+    var ativa: [String] { soAutorizados ? allow : deny }
+}
+
+
 
 struct Sistema: Decodable {
     let host: String
@@ -151,13 +174,17 @@ enum Banda: String, CaseIterable, Identifiable {
     case g5 = "5 GHz"
     case g2 = "2,4 GHz"
     case cabo = "Cabo"
+    case controle = "Controle"
     var id: String { rawValue }
     var icone: String {
         switch self {
         case .g5, .g2: return "wifi"
         case .cabo: return "cable.connector"
+        case .controle: return "lock.shield"
         }
     }
+    /// Dá para bloquear no Wi-Fi (os de cabo e os do roteador IoT, não).
+    var bloqueavel: Bool { self == .g5 || self == .g2 }
 }
 
 struct Aparelho: Identifiable {
@@ -175,6 +202,10 @@ struct Aparelho: Identifiable {
     var modo: String?
     var baixando: Double?
     var enviando: Double?
+    /// Conectado agora (para os itens da aba Controle, que lista também quem está fora do ar).
+    var online = false
+    /// É o iPhone que está usando o app: não pode ser bloqueado por ele mesmo.
+    var euMesmo = false
 
     /// 0 a 1, para o símbolo de Wi-Fi.
     var sinal: Double {

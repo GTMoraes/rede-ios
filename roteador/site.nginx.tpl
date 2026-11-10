@@ -19,7 +19,7 @@ server {
 		return 200 '{"app":"netmon","host":"$hostname","v":1}';
 	}
 
-	# download do teste de velocidade: arquivo esparso de 256 MB na RAM (não ocupa memória)
+	# download do teste de velocidade: arquivo de 8 MB na RAM (/tmp), baixado várias vezes pelo app
 	location = /nm/dl {
 		if ($nm_ok = 0) {
 			return 403;

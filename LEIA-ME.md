@@ -5,8 +5,13 @@ App nativo (SwiftUI, iOS 26, Liquid Glass) que mostra o estado do roteador AX360
 - **Painel:** internet (PPPoE, há quanto tempo, IP público, prefixo IPv6, DNS), as 4 portas (velocidade, quedas, CRC,
   zerar contadores com toque longo), quantos aparelhos em cada banda, roteador (ligado há, carga, memória) e
   **Reiniciar o roteador** (com confirmação).
-- **Aparelhos:** 5 GHz, 2,4 GHz e Cabo (inclui os aparelhos atrás do roteador IoT). Nome, IP, MAC, sinal, taxa do link,
-  tráfego atual. Toque para dar um nome (fica só no iPhone).
+- **Aparelhos:** 5 GHz, 2,4 GHz, Cabo (inclui os aparelhos atrás do roteador IoT) e Controle. Nome, IP, MAC, sinal,
+  taxa do link, tráfego atual. Toque para dar um nome (fica só no iPhone). **Arrastar para a esquerda** bloqueia no
+  Wi-Fi (até a metade mostra o botão; até o fim, executa).
+- **Controle (acesso ao Wi-Fi):** dois modos. *Lista de bloqueio*: qualquer um com a senha entra, menos os bloqueados.
+  *Só autorizados*: só a lista entra. "Autorizar os conectados agora" copia quem está no Wi-Fi para a lista de
+  autorizados. Trocar de modo não derruba quem continua permitido; só quem ficou de fora cai. As duas listas ficam
+  guardadas no roteador.
 - **Velocidade:** iPhone → Internet (Cloudflare), Roteador → Internet, GT-SRV → Internet (cabo), iPhone ↔ Roteador
   (só o Wi-Fi) e iPhone ↔ GT-SRV. Download, upload e latência; os últimos resultados ficam guardados.
 
@@ -67,12 +72,23 @@ Bundle ID `com.gtm.rede`.
 
 ## Detalhes que importam
 
-- **Roteador:** tudo em `/etc` (persistente). A cada boot o `netmon.init` recria o que fica na RAM: o arquivo esparso
-  de 256 MB do teste (`/tmp/netmon/blob`, não ocupa memória) e o link `/www/cgi-bin/netmon`. O nginx do roteador
+- **Roteador:** tudo em `/etc` (persistente). A cada boot o `netmon.init` recria o que fica na RAM: o arquivo de
+  8 MB do teste (`/tmp/netmon/blob`) e o link `/www/cgi-bin/netmon`. ⚠️ Não trocar por um arquivo esparso grande: no
+  kernel 4.4 do roteador, o `sendfile` de arquivo esparso em tmpfs ocupa a RAM de verdade. Em 10/11/2026 um arquivo
+  esparso de 256 MB encheu a memória (o roteador tem ~400 MB, ~130 MB livres) e travou o roteador no primeiro teste. O nginx do roteador
   ganha uma linha `include /etc/netmon/*.nginx;`; se o `nginx -t` falhar, o script desfaz sozinho.
 - **Teste do roteador para a internet:** o `curl` do roteador não tem certificados raiz (usa `-k`) e o processador
   limita a medição (~250 Mb/s em 4 fluxos, medido em 10/11/2026). Por isso existe o teste pelo GT-SRV (cabo).
-- **Teste iPhone ↔ Roteador:** download do arquivo esparso; upload em pedaços de 4 MB que o nginx lê inteiros antes de
+- **Teste iPhone ↔ Roteador:** download do arquivo de 8 MB repetido; upload em pedaços de 4 MB que o nginx lê inteiros antes de
   responder (repasse para `/nm/sink`).
+- **Acesso ao Wi-Fi:** `?a=block|unblock&mac=…`, `?a=snapshot` e `?a=mode&m=allow|deny` (só POST). As listas ficam
+  em `/etc/netmon/acl_deny` e `/etc/netmon/acl_allow`; a do modo ativo é copiada para `wireless.@wifi-iface[0/1].maclist`
+  com `macfilter='deny'` ou `'allow'`, que o firmware aplica no boot (`/lib/wifi/qcawificfg80211.sh`, lista "_sec" do
+  chip). Na hora: `maccmd_sec 3` (limpa), `addmac_sec` de cada um, `maccmd_sec 1|2` e `kickmac` só de quem ficou de fora
+  (pelo `cfg80211tool`, ou `iwpriv` se ele não existir). A lista do chip só vale para novas conexões, então trocar de
+  modo não derruba quem continua permitido. Proteções: o aparelho que está usando o app não pode se bloquear e entra
+  sozinho na lista ao ligar "só autorizados"; ligar com a lista vazia é recusado. Vale para 5 GHz e 2,4 GHz do AX3600; o Wi-Fi do roteador IoT é outro
+  aparelho. É bloqueio por MAC: quem sabe a senha e troca o endereço (MAC aleatório) entra de novo; nesse caso, trocar a
+  senha do Wi-Fi.
 - **Portas:** os contadores e o reset são os mesmos do rodapé e da seção "Port status" da interface do roteador
   (`/etc/wanlink.base` e `/etc/wanlink/base.ethX`).
