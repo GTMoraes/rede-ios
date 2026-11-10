@@ -66,11 +66,11 @@ final class Medidor: NSObject, URLSessionDataDelegate, @unchecked Sendable {
         let fila = OperationQueue()
         fila.maxConcurrentOperationCount = 1
         sessao = URLSession(configuration: cfg, delegate: self, delegateQueue: fila)
-        trava.lock()
-        ativo = true
-        bytes = 0
-        falha = nil
-        trava.unlock()
+        trava.withLock {
+            ativo = true
+            bytes = 0
+            falha = nil
+        }
         for _ in 0..<fluxos { abrir() }
 
         let inicio = Date()
@@ -96,9 +96,7 @@ final class Medidor: NSObject, URLSessionDataDelegate, @unchecked Sendable {
                 base = b
                 tBase = agora
             }
-            trava.lock()
-            let f = falha
-            trava.unlock()
+            let f = trava.withLock { falha }
             if let f, b == 0 {
                 parar()
                 throw ErroApp(f)

@@ -25,67 +25,23 @@ struct AparelhosView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 4, trailing: 16))
+                .linhaDeLista(topo: 8, base: 4)
 
                 if banda == .controle {
-                    controle
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                    controle.linhaDeLista()
                 }
 
                 Text(rodape(lista.count))
                     .font(.caption)
                     .foregroundStyle(Tema.texto2)
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 4, trailing: 20))
+                    .linhaDeLista(topo: 0, base: 4, esquerda: 20)
 
                 if banda == .cabo {
-                    ForEach(grupos(lista)) { g in
-                        let aberta = !fechadas.contains(g.dev) || !busca.isEmpty
-                        LinhaPorta(g: g, aberta: aberta)
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-                            .onTapGesture {
-                                withAnimation(.snappy) { alternarPorta(g.dev) }
-                            }
-                        if aberta {
-                            ForEach(g.filhos) { a in
-                                LinhaAparelho(a: a, filho: true)
-                                    .listRowBackground(Color.clear)
-                                    .listRowSeparator(.hidden)
-                                    .listRowInsets(EdgeInsets(top: 4, leading: 40, bottom: 4, trailing: 16))
-                                    .contextMenu { menu(a) }
-                                    .onTapGesture { editando = a }
-                            }
-                        }
+                    linhasCabo(lista)
+                } else {
+                    ForEach(lista) { a in
+                        linhaSimples(a)
                     }
-                }
-
-                ForEach(banda == .cabo ? [] : lista) { a in
-                    LinhaAparelho(a: a)
-                        .offset(x: saindo.contains(a.mac) ? -700 : 0)
-                        .opacity(saindo.contains(a.mac) ? 0 : 1)
-                        // arrastar até a metade mostra o botão; até o fim, executa
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            if let acao = acaoDoGesto(a) {
-                                Button {
-                                    alternar(a, bloquear: acao.bloquear)
-                                } label: {
-                                    Label(acao.titulo, systemImage: acao.icone)
-                                }
-                                .tint(acao.bloquear ? Tema.vermelho : Tema.verde)
-                            }
-                        }
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-                        .contextMenu { menu(a) }
-                        .onTapGesture { editando = a }
                 }
             }
             .listStyle(.plain)
@@ -124,6 +80,59 @@ struct AparelhosView: View {
                 Button("Cancelar", role: .cancel) {}
             } message: {
                 Text("Qualquer aparelho com a senha volta a conseguir entrar, menos os da lista de bloqueio. A lista de autorizados fica guardada para a próxima vez.")
+            }
+        }
+    }
+
+    // MARK: linhas
+
+    /// Aparelho de Wi-Fi ou da aba Controle: arrastar até a metade mostra o botão; até o fim, executa.
+    private func linhaSimples(_ a: Aparelho) -> some View {
+        LinhaAparelho(a: a)
+            .offset(x: saindo.contains(a.mac) ? -700 : 0)
+            .opacity(saindo.contains(a.mac) ? 0 : 1)
+            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                botaoDoGesto(a)
+            }
+            .linhaDeLista()
+            .contextMenu { menu(a) }
+            .onTapGesture { editando = a }
+    }
+
+    @ViewBuilder
+    private func botaoDoGesto(_ a: Aparelho) -> some View {
+        if let acao = acaoDoGesto(a) {
+            Button {
+                alternar(a, bloquear: acao.bloquear)
+            } label: {
+                Label(acao.titulo, systemImage: acao.icone)
+            }
+            .tint(acao.bloquear ? Tema.vermelho : Tema.verde)
+        }
+    }
+
+    /// Aba Cabo: cada porta ("pai") com os aparelhos atrás dela ("filhos").
+    @ViewBuilder
+    private func linhasCabo(_ lista: [Aparelho]) -> some View {
+        ForEach(grupos(lista)) { g in
+            linhasGrupo(g)
+        }
+    }
+
+    @ViewBuilder
+    private func linhasGrupo(_ g: Grupo) -> some View {
+        let aberta = !fechadas.contains(g.dev) || !busca.isEmpty
+        LinhaGrupoPorta(g: g, aberta: aberta)
+            .linhaDeLista()
+            .onTapGesture {
+                withAnimation(.snappy) { alternarPorta(g.dev) }
+            }
+        if aberta {
+            ForEach(g.filhos) { a in
+                LinhaAparelho(a: a, filho: true)
+                    .linhaDeLista(topo: 4, base: 4, esquerda: 40)
+                    .contextMenu { menu(a) }
+                    .onTapGesture { editando = a }
             }
         }
     }
@@ -318,7 +327,7 @@ struct AparelhosView: View {
 }
 
 /// Linha "pai" da aba Cabo: a porta, com quantos aparelhos estão atrás dela.
-struct LinhaPorta: View {
+struct LinhaGrupoPorta: View {
     let g: AparelhosView.Grupo
     let aberta: Bool
 
@@ -435,5 +444,14 @@ struct LinhaAparelho: View {
         case 0.2...: return Tema.laranja
         default: return Tema.vermelho
         }
+    }
+}
+
+extension View {
+    /// Linha de lista sem fundo nem separador (o vidro fica por conta da própria linha).
+    func linhaDeLista(topo: CGFloat = 6, base: CGFloat = 6, esquerda: CGFloat = 16) -> some View {
+        self.listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+            .listRowInsets(EdgeInsets(top: topo, leading: esquerda, bottom: base, trailing: 16))
     }
 }
