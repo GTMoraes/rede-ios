@@ -294,6 +294,11 @@ final class Estado {
         default:
             for mac in d.acl.deny { itens.append((mac, Situacao.bloqueado)) }
         }
+        if d.acl.aprovacao {
+            for t in d.acl.historico ?? [] { itens.append((t.mac.lowercased(), Situacao.tentativa)) }
+        }
+        var tentativas: [String: Tentativa] = [:]
+        for t in d.acl.historico ?? [] { tentativas[t.mac.lowercased()] = t }
         var naLista = Set<String>()
         for (mac, situacao) in itens where !naLista.contains(mac) {
             naLista.insert(mac)
@@ -301,6 +306,12 @@ final class Estado {
             a.online = conectados.contains(mac)
             a.euMesmo = mac == eu
             a.situacao = situacao
+            if situacao == .tentativa, let t = tentativas[mac] {
+                a.ultimaVez = Date(timeIntervalSince1970: t.last)
+                a.vezes = t.vezes
+                if a.nome == "Sem nome" && !t.nome.isEmpty { a.nome = t.nome }
+                a.porta = t.banda == "5g" ? "5 GHz" : "2,4 GHz"
+            }
             lista.append(a)
         }
         return lista.sorted {

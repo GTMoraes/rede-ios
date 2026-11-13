@@ -428,6 +428,64 @@ local function pending()
   return t
 end
 
+-- histórico de tentativas (modo aprovação) ----------------------------------
+-- Pendentes que saíram sem decisão. "mac primeiro último vezes banda nome", um por linha. Fica na RAM
+-- (/tmp/netmon/historico) e vai para a flash (/etc/netmon/historico) só quando aparece aparelho novo, quando um
+-- aparelho volta, ou de hora em hora: gravar na flash a cada 15 s a desgastaria.
+local HIST_RAM = "/tmp/netmon/historico"
+local HIST_ETC = ACLDIR .. "/historico"
+
+local function hist_load()
+  local txt = rdall(HIST_RAM)
+  if txt == "" then txt = rdall(HIST_ETC) end
+  local h = {}
+  for line in txt:gmatch("[^\n]+") do
+    local mac, p1, p2, n, banda, nome = line:match("^(%S+) (%d+) (%d+) (%d+) (%S+) ?(.*)$")
+    if mac then
+      h[mac] = { first = tonumber(p1), last = tonumber(p2), vezes = tonumber(n), banda = banda, nome = nome or "" }
+    end
+  end
+  return h
+end
+
+local function hist_save(h, persistir)
+  local lista = {}
+  for mac, e in pairs(h) do lista[#lista + 1] = { mac, e } end
+  table.sort(lista, function(x, y) return x[2].last > y[2].last end)
+  local L = {}
+  for i = 1, math.min(#lista, 100) do
+    local mac, e = lista[i][1], lista[i][2]
+    L[#L + 1] = mac .. " " .. string.format("%d %d %d", e.first, e.last, e.vezes) .. " " .. e.banda .. " " ..
+      (e.nome:gsub("[%c]", " "))
+  end
+  local txt = table.concat(L, "\n")
+  ex("mkdir -p /tmp/netmon")
+  wr(HIST_RAM, txt)
+  if persistir then wr(HIST_ETC, txt) end
+end
+
+local function hist_remove(mac)
+  local h = hist_load()
+  if h[mac] then
+    h[mac] = nil
+    hist_save(h, true)
+  end
+end
+
+-- quem tentou entrar e saiu sem ser aprovado nem bloqueado
+local function historico_json()
+  local allow, deny, pend = load_list("allow"), load_list("deny"), pending()
+  local t = {}
+  for mac, e in pairs(hist_load()) do
+    if not pend[mac] and not contains(allow, mac) and not contains(deny, mac) then
+      t[#t + 1] = '{"mac":' .. q(mac) .. ',"first":' .. string.format("%d", e.first) ..
+        ',"last":' .. string.format("%d", e.last) .. ',"vezes":' .. string.format("%d", e.vezes) ..
+        ',"banda":' .. q(e.banda) .. ',"nome":' .. q(e.nome) .. "}"
+    end
+  end
+  return "[" .. table.concat(t, ",") .. "]"
+end
+
 -- ao ligar a aprovação: derruba quem está conectado e não é autorizado (volta como pendente; também corta
 -- conexões antigas que a aceleração por hardware manteria abertas)
 local function kick_unapproved()
@@ -452,7 +510,7 @@ local function acl_json()
     pend[#pend + 1] = '{"mac":' .. q(m) .. ',"band":' .. q(wl == "wl0" and "5g" or "2g") .. "}"
   end
   return '{"mode":' .. q(mode()) .. ',"deny":' .. arr(deny) .. ',"allow":' .. arr(load_list("allow")) ..
-    ',"pending":[' .. table.concat(pend, ",") .. "]}", arr(deny)
+    ',"pending":[' .. table.concat(pend, ",") .. '],"historico":' .. historico_json() .. "}", arr(deny)
 end
 
 -- ações (todas só por POST) -------------------------------------------------
@@ -491,6 +549,7 @@ local function acl_action(a)
       end
       save_list("deny", deny)
     end
+    hist_remove(mac)
     apply(md)
   elseif a == "approve" then
     -- aprovar: entra na lista de autorizados (e sai da de bloqueio); no modo aprovação, a rede libera na hora
@@ -500,6 +559,7 @@ local function acl_action(a)
     if not contains(allow, mac) then allow[#allow + 1] = mac end
     save_list("allow", allow)
     save_list("deny", without(deny, mac))
+    hist_remove(mac)
     apply(md)
   elseif a == "forget" then
     -- esquecer: sai das duas listas (no modo aprovação, se voltar, é pendente de novo e avisa outra vez)
@@ -513,6 +573,7 @@ local function acl_action(a)
       if line:sub(1, 17) ~= mac then L[#L + 1] = line end
     end
     wr("/tmp/netmon/vistos", table.concat(L, "\n"))
+    hist_remove(mac)
     apply(md)
   elseif a == "snapshot" then
     -- no modo aprovação, todo conectado fora da lista é um pendente: aprovar é um por um
@@ -803,6 +864,36 @@ local function watch()
     if m then vistos[m] = { ts = tonumber(ts), env = env == "1" } end
   end
   local agora = os.time()
+  -- histórico: cada pendente visto agora (novo, de volta, ou ainda aqui)
+  local h = hist_load()
+  local mudou, persistir = false, false
+  for m, wl in pairs(pending()) do
+    local banda = (wl == "wl0") and "5g" or "2g"
+    local e = h[m]
+    if not e then
+      h[m] = { first = agora, last = agora, vezes = 1, banda = banda, nome = "" }
+      e = h[m]
+      persistir = true
+    else
+      if agora - e.last > 120 then
+        e.vezes = e.vezes + 1
+        persistir = true
+      end
+      e.last = agora
+      e.banda = banda
+    end
+    if e.nome == "" then
+      local nm = nome_de(m)
+      if nm ~= "" then e.nome = nm; persistir = true end
+    end
+    mudou = true
+  end
+  if mudou then
+    local ult = tonumber(rd("/tmp/netmon/historico_gravado") or "") or 0
+    if agora - ult > 3600 then persistir = true end
+    if persistir then wr("/tmp/netmon/historico_gravado", string.format("%d", agora)) end
+    hist_save(h, persistir)
+  end
   local url = rd(ACLDIR .. "/notify_url") or "http://10.0.0.129:9092/evento"
   local tok = rd(ACLDIR .. "/token") or ""
   for m, wl in pairs(pending()) do

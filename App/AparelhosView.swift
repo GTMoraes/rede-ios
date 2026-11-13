@@ -18,6 +18,7 @@ struct AparelhosView: View {
     /// Aba Controle: autorizados fora do ar e bloqueados ficam escondidos até tocar no botão.
     @State private var verAutorizadosFora = false
     @State private var verBloqueados = false
+    @State private var verTentativas = false
 
     var body: some View {
         NavigationStack {
@@ -97,7 +98,7 @@ struct AparelhosView: View {
                 botaoDoGesto(a)
             }
             .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                if a.situacao == .pendente {
+                if a.situacao == .pendente || a.situacao == .tentativa {
                     Button {
                         executar { await estado.aprovar(mac: a.mac) }
                     } label: {
@@ -125,9 +126,12 @@ struct AparelhosView: View {
         let tudo = !busca.isEmpty
         let fora = lista.filter { $0.situacao == .autorizado && !$0.online }
         let bloqueados = lista.filter { $0.situacao == .bloqueado && !$0.online }
-        ForEach(lista.filter { $0.situacao == .pendente || $0.online }) { a in
+        let tentativas = lista.filter { $0.situacao == .tentativa }
+        ForEach(lista.filter { $0.situacao == .pendente || ($0.online && $0.situacao != .tentativa) }) { a in
             linhaSimples(a)
         }
+        grupoEscondido(tentativas, titulo: tentativas.count == 1 ? "tentativa de entrar" : "tentativas de entrar",
+                       aberto: $verTentativas, tudo: tudo)
         grupoEscondido(fora, titulo: "autorizados fora do ar", aberto: $verAutorizadosFora, tudo: tudo)
         grupoEscondido(bloqueados, titulo: bloqueados.count == 1 ? "bloqueado" : "bloqueados",
                        aberto: $verBloqueados, tudo: tudo)
@@ -414,7 +418,7 @@ struct AparelhosView: View {
         } label: {
             Label("Copiar MAC", systemImage: "doc.on.doc")
         }
-        if a.situacao == .pendente {
+        if a.situacao == .pendente || a.situacao == .tentativa {
             Button {
                 executar { await estado.aprovar(mac: a.mac) }
             } label: {
@@ -425,7 +429,8 @@ struct AparelhosView: View {
             Button {
                 esquecer(a)
             } label: {
-                Label("Esquecer (tirar da lista)", systemImage: "trash")
+                Label(a.situacao == .tentativa ? "Tirar do histórico" : "Esquecer (tirar da lista)",
+                      systemImage: "trash")
             }
         }
         if let acao = acaoDoGesto(a) {
@@ -463,7 +468,7 @@ struct AparelhosView: View {
             if estado.acl?.aprovacao == true {
                 let p = estado.pendentes.count
                 let base = p == 0 ? "Nenhum pendente. " : "\(p) esperando aprovação: arraste para a direita para aprovar, para a esquerda para recusar. "
-                return base + "Quem está fora do ar fica escondido abaixo; arraste para a direita para esquecer."
+                return base + "Abaixo, escondidos: quem tentou entrar e saiu (dá para aprovar ou bloquear depois), autorizados fora do ar e bloqueados."
             }
             if so { return n == 0 ? "Nenhum autorizado." : "Autorizados (\(n)). Arraste para a esquerda para remover; para a direita, esquecer quem está fora do ar." }
             return n == 0 ? "Nenhum aparelho bloqueado." : "Bloqueados (\(n)). Arraste para a esquerda para desbloquear; para a direita, esquecer."
@@ -547,6 +552,8 @@ struct LinhaAparelho: View {
             Group {
                 if a.banda == .cabo {
                     Image(systemName: "cable.connector")
+                } else if a.situacao == .tentativa {
+                    Image(systemName: "clock.arrow.circlepath")
                 } else if a.banda == .controle {
                     Image(systemName: a.online ? "wifi" : "wifi.slash")
                 } else {
@@ -583,7 +590,7 @@ struct LinhaAparelho: View {
                 if let t = textoSituacao {
                     Text(t)
                         .font(a.situacao == .pendente ? Font.caption2.weight(.semibold) : Font.caption2)
-                        .foregroundStyle(a.situacao == .pendente ? Tema.laranja : Tema.texto2)
+                        .foregroundStyle(a.situacao == .pendente || a.situacao == .tentativa ? Tema.laranja : Tema.texto2)
                 }
                 if a.euMesmo {
                     Text("este iPhone").font(.caption2.weight(.semibold)).foregroundStyle(Tema.acento)
@@ -613,11 +620,23 @@ struct LinhaAparelho: View {
     private var textoSituacao: String? {
         guard let sit = a.situacao else { return nil }
         if a.banda != .controle { return sit == .pendente ? sit.texto : nil }
+        if sit == .tentativa {
+            var t = sit.texto
+            if let u = a.ultimaVez {
+                let f = RelativeDateTimeFormatter()
+                f.locale = Locale(identifier: "pt_BR")
+                f.unitsStyle = .short
+                t += " · " + f.localizedString(for: u, relativeTo: Date())
+            }
+            if let n = a.vezes, n > 1 { t += " · \(n) vezes" }
+            return t
+        }
         let onde = a.online ? "conectado agora" : "fora do ar"
         return sit.texto + " · " + onde
     }
 
     private var cor: Color {
+        if a.situacao == .tentativa { return Tema.laranja }
         if a.banda == .controle { return a.online ? Tema.acento : Tema.texto2 }
         guard a.banda != .cabo else { return Tema.acento }
         switch a.sinal {

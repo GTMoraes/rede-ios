@@ -68,6 +68,8 @@ struct ACL: Decodable {
     let deny: [String]
     /// Conectados no Wi-Fi esperando aprovação (só no modo aprovação).
     var pending: [Pendente]? = nil
+    /// Quem tentou entrar e saiu sem ser aprovado nem bloqueado.
+    var historico: [Tentativa]? = nil
     var soAutorizados: Bool { mode == "allow" }
     var aprovacao: Bool { mode == "approve" }
     var pendentes: [Pendente] { pending ?? [] }
@@ -86,15 +88,26 @@ struct Pendente: Decodable {
     let band: String
 }
 
+struct Tentativa: Decodable {
+    let mac: String
+    let first: Double
+    let last: Double
+    let vezes: Int
+    let banda: String
+    let nome: String
+}
+
 /// Situação de um aparelho na aba Controle.
 enum Situacao: Int {
     case pendente = 0
-    case autorizado = 1
-    case bloqueado = 2
+    case tentativa = 1
+    case autorizado = 2
+    case bloqueado = 3
 
     var texto: String {
         switch self {
         case .pendente: return "aguardando aprovação"
+        case .tentativa: return "tentou entrar"
         case .autorizado: return "autorizado"
         case .bloqueado: return "bloqueado"
         }
@@ -260,8 +273,11 @@ struct Aparelho: Identifiable {
     var online = false
     /// É o iPhone que está usando o app: não pode ser bloqueado por ele mesmo.
     var euMesmo = false
-    /// Na aba Controle: pendente, autorizado ou bloqueado. Nas bandas: só "pendente" (modo aprovação).
+    /// Na aba Controle: pendente, tentativa, autorizado ou bloqueado. Nas bandas: só "pendente" (modo aprovação).
     var situacao: Situacao?
+    /// Tentativas: quando foi a última vez e quantas vezes o aparelho apareceu.
+    var ultimaVez: Date?
+    var vezes: Int?
 
     /// 0 a 1, para o símbolo de Wi-Fi.
     var sinal: Double {

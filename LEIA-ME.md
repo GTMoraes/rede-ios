@@ -14,6 +14,11 @@ App nativo (SwiftUI, iOS 26, Liquid Glass) que mostra o estado do roteador AX360
   **em quarentena** (só DHCP; sem internet, sem os outros aparelhos e sem o roteador) até ser aprovado. Em ~30 s chega
   um **push do próprio app** ("Aparelho novo no Wi-Fi"), com os botões Aprovar e Recusar ao segurar o aviso; tocar abre
   a aba Controle. Na lista, arrastar para a direita aprova e para a esquerda recusa.
+- **Histórico de tentativas (modo aprovação):** quem conectou e saiu sem ser aprovado nem bloqueado fica na aba
+  Controle, no grupo "tentativas de entrar" (quando foi a última vez, quantas vezes), para aprovar ou bloquear depois.
+  No roteador: `/tmp/netmon/historico` (RAM, atualizado pelo vigia) e `/etc/netmon/historico` (flash, gravado só com
+  aparelho novo, quando um volta, ou de hora em hora). Até 100 aparelhos; decidir (aprovar, bloquear, esquecer) tira
+  do histórico.
 - **Na aba Controle,** pendentes e conectados ficam à vista; autorizados fora do ar e bloqueados ficam atrás de um botão
   cada. Para quem está fora do ar, arrastar para um lado bloqueia/desbloqueia e para o outro **esquece** (`?a=forget`,
   tira das duas listas).
