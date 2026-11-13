@@ -71,7 +71,7 @@ function pingCF() {
     const t0 = process.hrtime.bigint();
     let feito = false;
     const fim = (v) => { if (!feito) { feito = true; clearTimeout(prazo); ok(v); } };
-    const r = https.get({ host: CF, port: CF_PORT, path: '/__down?bytes=0', agent: agente }, (res) => {
+    const r = https.get({ host: CF, port: CF_PORT, path: '/__down?bytes=0', agent: agente, headers: UA }, (res) => {
       res.resume();
       res.on('end', () => fim(Number(process.hrtime.bigint() - t0) / 1e6));
     });
@@ -82,7 +82,7 @@ function pingCF() {
 }
 
 // O caminho até a Cloudflare é longo (~60 ms pela TIM, contra 2 ms do fast.com, que mede dentro da rede da
-// operadora). Num caminho longo cada conexão demora a acelerar; por isso: muitas conexões em paralelo e os
+// operadora). Num caminho longo cada conexão demora a acelerar; por isso: várias conexões em paralelo e os
 // primeiros segundos descartados (a taxa é medida só depois do aquecimento).
 const CF_PORT = Number(process.env.CF_PORT || 443);
 const AQUECIMENTO_MS = 2000;
@@ -102,18 +102,30 @@ function medirTaxa(ms, contar) {
   });
 }
 
+const UA = { 'User-Agent': 'rede-srv (teste de velocidade do app Rede)' };
+
+// Só conta resposta 200. Se a Cloudflare recusar (ex.: 429, limite de pedidos por IP), aquela conexão para:
+// insistir na hora só piora o bloqueio. O código da recusa volta no resultado.
 function baixarPor(ms, fluxos) {
   let bytes = 0;
   const abertos = new Set();
   const limite = Date.now() + ms;
   let acabou = false;
+  const recusas = {};
   const abrir = () => {
     if (acabou || Date.now() >= limite) return;
-    const r = https.get({ host: CF, port: CF_PORT, path: '/__down?bytes=99999999', agent: agente }, (res) => {
-      res.on('data', (c) => { bytes += c.length; });
-      res.on('end', () => { abertos.delete(r); abrir(); });
-      res.on('error', () => {});
-    });
+    const r = https.get({ host: CF, port: CF_PORT, path: '/__down?bytes=99999999', agent: agente, headers: UA },
+      (res) => {
+        if (res.statusCode !== 200) {
+          recusas[res.statusCode] = (recusas[res.statusCode] || 0) + 1;
+          res.resume();
+          abertos.delete(r);
+          return;
+        }
+        res.on('data', (c) => { bytes += c.length; });
+        res.on('end', () => { abertos.delete(r); abrir(); });
+        res.on('error', () => {});
+      });
     r.on('error', () => { abertos.delete(r); });
     abertos.add(r);
   };
@@ -121,18 +133,22 @@ function baixarPor(ms, fluxos) {
   return medirTaxa(ms, () => bytes).then((m) => {
     acabou = true;
     for (const r of abertos) r.destroy();
-    return m;
+    return { ...m, recusas };
   });
 }
 
 function enviarPor(ms, fluxos) {
   let bytes = 0;
+  const recusas = {};
   const abertos = new Set();
   let acabou = false;
   const abrir = () => {
     const r = https.request({ host: CF, port: CF_PORT, path: '/__up', method: 'POST', agent: agente,
-      headers: { 'Content-Type': 'application/octet-stream' } });
-    r.on('response', (res) => res.resume());
+      headers: { ...UA, 'Content-Type': 'application/octet-stream' } });
+    r.on('response', (res) => {
+      if (res.statusCode >= 400) recusas[res.statusCode] = (recusas[res.statusCode] || 0) + 1;
+      res.resume();
+    });
     r.on('error', () => {});
     abertos.add(r);
     const escrever = () => {
@@ -147,7 +163,7 @@ function enviarPor(ms, fluxos) {
   return medirTaxa(ms, () => bytes).then((m) => {
     acabou = true;
     for (const r of abertos) r.destroy();
-    return m;
+    return { ...m, recusas };
   });
 }
 
@@ -178,14 +194,24 @@ async function wantest(req, res, u) {
     const pings = [];
     for (let i = 0; i < 5; i++) pings.push(await pingCF());
     const validos = pings.filter((x) => x != null).sort((a, b) => a - b);
-    const d = await baixarPor(secs * 1000, 12);
+    const d = await baixarPor(secs * 1000, 8);
     const s = await enviarPor(secs * 1000, 6);
+    // metade ou mais das conexões recusadas: o número não representaria o link
+    const total = (x) => Object.values(x.recusas).reduce((a, b) => a + b, 0);
+    const recusou = (x) => total(x) >= 3 || (total(x) > 0 && x.util < 1e6);
+    if (recusou(d) || recusou(s)) {
+      const cod = Object.keys(recusou(d) ? d.recusas : s.recusas).join(', ');
+      return json(res, 502, {
+        error: `A Cloudflare recusou o ${recusou(d) ? 'download' : 'upload'} (HTTP ${cod}). ` +
+          (cod.includes('429') ? 'É o limite de testes seguidos: tente de novo em alguns minutos.' : ''),
+      });
+    }
     json(res, 200, {
       down_mbps: +(d.util * 8 / d.secs / 1e6).toFixed(1),
       up_mbps: +(s.util * 8 / s.secs / 1e6).toFixed(1),
       down_bytes: d.bytes, up_bytes: s.bytes,
       ping_ms: validos.length ? +validos[Math.floor(validos.length / 2)].toFixed(1) : null,
-      streams: 12,
+      streams: 8,
     });
   } catch (e) {
     json(res, 500, { error: String(e && e.message || e) });
