@@ -11,6 +11,8 @@ struct EditarAparelhoView: View {
     @State private var ip: String
     @State private var salvando = false
     @State private var erro: String?
+    @State private var fabricante: String?
+    @State private var consultando = false
 
     init(a: Aparelho) {
         self.a = a
@@ -48,6 +50,7 @@ struct EditarAparelhoView: View {
 
                 Section {
                     LabeledContent("MAC", value: a.mac)
+                    LabeledContent("Fabricante", value: fabricante ?? (consultando ? "consultando…" : "não encontrado"))
                     LabeledContent("IP agora", value: a.ip ?? "—")
                     LabeledContent("Conexão", value: a.porta ?? a.banda.rawValue)
                     if let c = a.conectado { LabeledContent("Conectado há", value: c) }
@@ -78,6 +81,14 @@ struct EditarAparelhoView: View {
             }
         }
         .presentationDetents([.medium, .large])
+        .task {
+            fabricante = Fabricantes.descricao(a.mac)
+            if fabricante == nil {
+                consultando = true
+                fabricante = await Fabricantes.online(a.mac)
+                consultando = false
+            }
+        }
     }
 
     private var rodapeIP: String {

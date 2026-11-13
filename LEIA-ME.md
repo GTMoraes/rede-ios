@@ -14,6 +14,13 @@ App nativo (SwiftUI, iOS 26, Liquid Glass) que mostra o estado do roteador AX360
   **em quarentena** (só DHCP; sem internet, sem os outros aparelhos e sem o roteador) até ser aprovado. Em ~30 s chega
   um **push do próprio app** ("Aparelho novo no Wi-Fi"), com os botões Aprovar e Recusar ao segurar o aviso; tocar abre
   a aba Controle. Na lista, arrastar para a direita aprova e para a esquerda recusa.
+- **Na aba Controle,** pendentes e conectados ficam à vista; autorizados fora do ar e bloqueados ficam atrás de um botão
+  cada. Para quem está fora do ar, arrastar para um lado bloqueia/desbloqueia e para o outro **esquece** (`?a=forget`,
+  tira das duas listas).
+- **Consulta de MAC:** buscar um MAC (ou só o começo, 6+ dígitos) mostra o fabricante pelo prefixo e se o endereço é
+  aleatório (2º dígito 2, 6, A ou E = inventado pelo aparelho, sem fabricante). Aparelho sem nome mostra o fabricante na
+  lista. A tabela (`App/oui.txt`) é baixada pelo workflow a cada build (Wireshark, ou IEEE); o que não estiver nela o app
+  pergunta ao `api.macvendors.com` e guarda.
 - **Controle (acesso ao Wi-Fi):** dois modos. *Lista de bloqueio*: qualquer um com a senha entra, menos os bloqueados.
   *Só autorizados*: só a lista entra. O botão "Autorizar N de M conectados" copia para a lista de autorizados quem
   está no Wi-Fi e ainda não está nela (quando todos já estão, ele mostra isso e fica desativado). Trocar de modo não derruba quem continua permitido; só quem ficou de fora cai. As duas listas ficam

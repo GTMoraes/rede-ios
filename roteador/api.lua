@@ -2,7 +2,7 @@
 -- API do app Rede (AX3600). Chamada pelo nginx (porta 8077, /nm/api) via fcgi-cgi.
 -- O nginx já conferiu o token (cabeçalho X-NM-Token) antes de chegar aqui.
 -- Ações (?a=): all (padrão), reset&dev=ethX, reboot (só POST), wantest,
--- block, unblock, approve (&mac=…), snapshot e mode&m=allow|deny|approve (só POST): acesso ao Wi-Fi;
+-- block, unblock, approve, forget (&mac=…), snapshot e mode&m=allow|deny|approve (só POST): acesso ao Wi-Fi;
 -- name&mac=…&name=…, static_set&mac=…&ip=… e static_del&mac=… (só POST): nomes e IP fixo.
 
 local function rd(p)
@@ -501,6 +501,19 @@ local function acl_action(a)
     save_list("allow", allow)
     save_list("deny", without(deny, mac))
     apply(md)
+  elseif a == "forget" then
+    -- esquecer: sai das duas listas (no modo aprovação, se voltar, é pendente de novo e avisa outra vez)
+    local mac = valid_mac(Q.mac)
+    if not mac then return "400 Bad Request", '{"error":"mac"}' end
+    if mac == me then return "409 Conflict", '{"error":"Este é o aparelho que está usando o app."}' end
+    save_list("allow", without(load_list("allow"), mac))
+    save_list("deny", without(load_list("deny"), mac))
+    local L = {}
+    for line in rdall("/tmp/netmon/vistos"):gmatch("[^\n]+") do
+      if line:sub(1, 17) ~= mac then L[#L + 1] = line end
+    end
+    wr("/tmp/netmon/vistos", table.concat(L, "\n"))
+    apply(md)
   elseif a == "snapshot" then
     -- no modo aprovação, todo conectado fora da lista é um pendente: aprovar é um por um
     if md == "approve" then
@@ -857,7 +870,7 @@ elseif a == "name" or a == "static_set" or a == "static_del" then
     end
     if ok then out("200 OK", '{"ok":true}') else out("409 Conflict", '{"error":' .. q(err) .. "}") end
   end
-elseif a == "block" or a == "unblock" or a == "approve" or a == "snapshot" or a == "mode" then
+elseif a == "block" or a == "unblock" or a == "approve" or a == "forget" or a == "snapshot" or a == "mode" then
   if METHOD ~= "POST" then
     out("405 Method Not Allowed", '{"error":"POST"}')
   else

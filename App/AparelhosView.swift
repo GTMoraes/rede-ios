@@ -15,6 +15,9 @@ struct AparelhosView: View {
     @State private var ocupado = false
     /// Portas recolhidas na aba Cabo (por padrão, todas abertas).
     @State private var fechadas = Set<String>()
+    /// Aba Controle: autorizados fora do ar e bloqueados ficam escondidos até tocar no botão.
+    @State private var verAutorizadosFora = false
+    @State private var verBloqueados = false
 
     var body: some View {
         NavigationStack {
@@ -37,8 +40,15 @@ struct AparelhosView: View {
                     .foregroundStyle(Tema.texto2)
                     .linhaDeLista(topo: 0, base: 4, esquerda: 20)
 
+                if Fabricantes.pareceMAC(busca) {
+                    CartaoConsultaMAC(texto: busca, naRede: naRedeConsulta)
+                        .linhaDeLista()
+                }
+
                 if banda == .cabo {
                     linhasCabo(lista)
+                } else if banda == .controle {
+                    linhasControle(lista)
                 } else {
                     ForEach(lista) { a in
                         linhaSimples(a)
@@ -94,11 +104,69 @@ struct AparelhosView: View {
                         Label("Aprovar", systemImage: "checkmark.circle.fill")
                     }
                     .tint(Tema.verde)
+                } else if podeEsquecer(a) {
+                    Button {
+                        esquecer(a)
+                    } label: {
+                        Label("Esquecer", systemImage: "trash")
+                    }
+                    .tint(.gray)
                 }
             }
             .linhaDeLista()
             .contextMenu { menu(a) }
             .onTapGesture { editando = a }
+    }
+
+    /// Aba Controle: pendentes e quem está conectado sempre à vista; autorizados fora do ar e bloqueados atrás de
+    /// um botão cada (na busca, aparece tudo).
+    @ViewBuilder
+    private func linhasControle(_ lista: [Aparelho]) -> some View {
+        let tudo = !busca.isEmpty
+        let fora = lista.filter { $0.situacao == .autorizado && !$0.online }
+        let bloqueados = lista.filter { $0.situacao == .bloqueado && !$0.online }
+        ForEach(lista.filter { $0.situacao == .pendente || $0.online }) { a in
+            linhaSimples(a)
+        }
+        grupoEscondido(fora, titulo: "autorizados fora do ar", aberto: $verAutorizadosFora, tudo: tudo)
+        grupoEscondido(bloqueados, titulo: bloqueados.count == 1 ? "bloqueado" : "bloqueados",
+                       aberto: $verBloqueados, tudo: tudo)
+    }
+
+    @ViewBuilder
+    private func grupoEscondido(_ itens: [Aparelho], titulo: String, aberto: Binding<Bool>, tudo: Bool) -> some View {
+        if !itens.isEmpty {
+            if !tudo {
+                Button {
+                    withAnimation(.snappy) { aberto.wrappedValue.toggle() }
+                } label: {
+                    Label("\(aberto.wrappedValue ? "Esconder" : "Mostrar") \(itens.count) \(titulo)",
+                          systemImage: aberto.wrappedValue ? "eye.slash" : "eye")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.glass)
+                .linhaDeLista()
+            }
+            if aberto.wrappedValue || tudo {
+                ForEach(itens) { a in
+                    linhaSimples(a)
+                }
+            }
+        }
+    }
+
+    /// "Esquecer" (tirar das listas) vale para quem está na aba Controle e fora do ar.
+    private func podeEsquecer(_ a: Aparelho) -> Bool {
+        a.banda == .controle && !a.online && !a.euMesmo && a.situacao != .pendente
+    }
+
+    private func esquecer(_ a: Aparelho) {
+        saindo.insert(a.mac)
+        Task {
+            let erro = await estado.esquecer(mac: a.mac)
+            saindo.remove(a.mac)
+            if let erro { aviso = erro }
+        }
     }
 
     @ViewBuilder
@@ -353,6 +421,13 @@ struct AparelhosView: View {
                 Label("Aprovar", systemImage: "checkmark.circle.fill")
             }
         }
+        if podeEsquecer(a) {
+            Button {
+                esquecer(a)
+            } label: {
+                Label("Esquecer (tirar da lista)", systemImage: "trash")
+            }
+        }
         if let acao = acaoDoGesto(a) {
             if acao.bloquear {
                 Button(role: .destructive) {
@@ -388,10 +463,10 @@ struct AparelhosView: View {
             if estado.acl?.aprovacao == true {
                 let p = estado.pendentes.count
                 let base = p == 0 ? "Nenhum pendente. " : "\(p) esperando aprovação: arraste para a direita para aprovar, para a esquerda para recusar. "
-                return base + "Autorizados e bloqueados ficam abaixo."
+                return base + "Quem está fora do ar fica escondido abaixo; arraste para a direita para esquecer."
             }
-            if so { return n == 0 ? "Nenhum autorizado." : "Autorizados (\(n)). Arraste para a esquerda para remover." }
-            return n == 0 ? "Nenhum aparelho bloqueado." : "Bloqueados (\(n)). Arraste para a esquerda para desbloquear."
+            if so { return n == 0 ? "Nenhum autorizado." : "Autorizados (\(n)). Arraste para a esquerda para remover; para a direita, esquecer quem está fora do ar." }
+            return n == 0 ? "Nenhum aparelho bloqueado." : "Bloqueados (\(n)). Arraste para a esquerda para desbloquear; para a direita, esquecer."
         case .cabo:
             return "\(n) por cabo, agrupados pela porta. Toque numa porta para mostrar ou esconder os aparelhos."
         case .g5, .g2:
@@ -400,13 +475,23 @@ struct AparelhosView: View {
         }
     }
 
+    /// Quantos aparelhos conhecidos começam com o MAC buscado.
+    private var naRedeConsulta: Int {
+        let h = Fabricantes.hex(busca)
+        let macs = Set(estado.aparelhos.map { $0.mac })
+        return macs.filter { Fabricantes.hex($0).hasPrefix(h) }.count
+    }
+
     private var filtrados: [Aparelho] {
         let todos = estado.aparelhos.filter { $0.banda == banda }
         let b = busca.trimmingCharacters(in: .whitespaces).lowercased()
         guard !b.isEmpty else { return todos }
-        return todos.filter {
-            $0.nome.lowercased().contains(b) || ($0.ip ?? "").contains(b) || $0.mac.contains(b)
-                || $0.nomeRede.lowercased().contains(b)
+        let h = Fabricantes.hex(b)
+        return todos.filter { a in
+            if a.nome.lowercased().contains(b) || a.nomeRede.lowercased().contains(b) { return true }
+            if (a.ip ?? "").contains(b) || a.mac.contains(b) { return true }
+            if (a.fabricante ?? "").lowercased().contains(b) { return true }
+            return h.count >= 4 && Fabricantes.hex(a.mac).contains(h)
         }
     }
 }
@@ -477,6 +562,9 @@ struct LinhaAparelho: View {
                     .font(.body.weight(.semibold))
                     .foregroundStyle(a.nome == "Sem nome" ? Tema.texto2 : .primary)
                     .lineLimit(1)
+                if a.nome == "Sem nome" || a.nomeRede.isEmpty, let f = a.fabricante {
+                    Text(f).font(.caption).foregroundStyle(Tema.texto2).lineLimit(1)
+                }
                 HStack(spacing: 4) {
                     if a.ipFixo != nil {
                         Image(systemName: "pin.fill").font(.caption2).foregroundStyle(Tema.acento)
@@ -547,5 +635,37 @@ extension View {
         self.listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
             .listRowInsets(EdgeInsets(top: topo, leading: esquerda, bottom: base, trailing: 16))
+    }
+}
+
+/// Resultado da busca quando o texto parece um MAC: fabricante pelo prefixo (tabela do app ou consulta online).
+struct CartaoConsultaMAC: View {
+    let texto: String
+    let naRede: Int
+    @State private var online: String?
+    @State private var consultando = false
+
+    var body: some View {
+        let aleatorio = Fabricantes.aleatorio(texto)
+        let local = Fabricantes.local(texto)
+        Cartao(titulo: "Consulta de MAC", icone: "magnifyingglass") {
+            LinhaInfo(rotulo: "Prefixo", valor: Fabricantes.prefixoFormatado(texto))
+            if aleatorio {
+                LinhaInfo(rotulo: "Fabricante", valor: "nenhum (MAC aleatório)", cor: Tema.laranja)
+                Text("O segundo dígito (2, 6, A ou E) indica endereço inventado pelo próprio aparelho, sem fabricante registrado. É o \"endereço privado\" de iPhone, Android e Windows, ou o de máquinas virtuais. Para saber o que é, veja por onde ele conecta e o nome que ele informa.")
+                    .font(.caption)
+                    .foregroundStyle(Tema.texto2)
+            } else {
+                LinhaInfo(rotulo: "Fabricante",
+                          valor: local ?? online ?? (consultando ? "consultando…" : "não encontrado"))
+            }
+            LinhaInfo(rotulo: "Na rede agora", valor: naRede == 0 ? "não" : "\(naRede)")
+        }
+        .task(id: Fabricantes.prefixo(texto) ?? "") {
+            guard !aleatorio, local == nil else { return }
+            consultando = true
+            online = await Fabricantes.online(texto)
+            consultando = false
+        }
     }
 }

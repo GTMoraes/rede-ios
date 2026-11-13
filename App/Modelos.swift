@@ -247,6 +247,8 @@ struct Aparelho: Identifiable {
     var dev: String?
     /// IP fixado no roteador (DHCP estático), se houver.
     var ipFixo: String?
+    /// Fabricante pelo prefixo do MAC (tabela do app), ou "MAC aleatório (privado)".
+    var fabricante: String?
     var rssi: Int?
     var taxaTx: Int?
     var taxaRx: Int?

@@ -133,6 +133,11 @@ final class Estado {
         await acaoAcesso("a=mode&m=\(m)")
     }
 
+    /// Tira o aparelho das duas listas (autorizados e bloqueados).
+    func esquecer(mac: String) async -> String? {
+        await acaoAcesso("a=forget&mac=\(mac)")
+    }
+
     /// Aprova um aparelho (entra na lista de autorizados; no modo aprovação, a rede libera na hora).
     func aprovar(mac: String) async -> String? {
         await acaoAcesso("a=approve&mac=\(mac)")
@@ -235,6 +240,7 @@ final class Estado {
             var a = Aparelho(mac: mac, nome: apelido(mac) ?? (rede.isEmpty ? "Sem nome" : rede),
                              nomeRede: rede, ip: ip, banda: banda)
             a.ipFixo = fixoPorMac[mac]
+            a.fabricante = Fabricantes.descricao(mac)
             a.baixando = t?.ip_list?.first?.tx_rate
             a.enviando = t?.ip_list?.first?.rx_rate
             if let o = t?.online_timer, banda == .cabo { a.conectado = Fmt.duracao(o) }

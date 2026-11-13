@@ -15,3 +15,7 @@ PARA-A-PASTA-*/
 .DS_Store
 # rede-srv: tokens de push
 servidor-gt-srv/dados/
+# tabela de fabricantes (baixada pelo workflow a cada build)
+App/oui.txt
+# pacotes feitos à mão para copiar para o GT-SRV
+*.zip

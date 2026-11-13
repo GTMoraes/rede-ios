@@ -70,6 +70,7 @@ struct RaizView: View {
 final class Delegado: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        Fabricantes.preparar()
         let central = UNUserNotificationCenter.current()
         central.delegate = self
         let aprovar = UNNotificationAction(identifier: "APROVAR", title: "Aprovar", options: [])
