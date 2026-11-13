@@ -72,6 +72,17 @@ mkdir -p ~/rede-srv && cp /mnt/c/Users/GTM/mover/rede-srv/* ~/rede-srv/
 cd ~/rede-srv && docker compose up -d && curl -s http://127.0.0.1:9092/id
 ```
 
+Teste de internet fora do Docker (no container a saída fica em ~100 Mb/s): o mesmo `server.js` roda também no WSL,
+como serviço `rede-teste` (porta 9093), e o container repassa o `/wantest` para ele (`WANTEST_URL` no compose).
+O teste vai até a Cloudflare, que pela TIM fica a ~60 ms (o fast.com mede contra servidores do Netflix dentro da TIM,
+a 2 ms, e por isso dá mais): 12 conexões no download, 6 no upload, e os 2 primeiros segundos descartados.
+
+```bash
+sudo cp ~/rede-srv/rede-teste.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now rede-teste
+curl -s http://127.0.0.1:9093/id
+```
+
 Firewall do Windows (PowerShell como administrador, no GT-SRV):
 
 ```powershell

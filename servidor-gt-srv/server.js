@@ -2,7 +2,8 @@
 //   /id                 identidade (o app confere se achou o servidor certo)
 //   /dl?bytes=N         download do teste de velocidade (bytes aleatórios, sem disco)
 //   /up                 upload do teste: lê tudo e responde quantos bytes chegaram
-//   /wantest?secs=8     teste de internet pelo cabo (GT-SRV → Cloudflare), sem Wi-Fi no caminho
+//   /wantest?secs=10    teste de internet pelo cabo (GT-SRV → Cloudflare), sem Wi-Fi no caminho; no container,
+//                       repassado ao serviço rede-teste do WSL (WANTEST_URL), fora do limite de rede do Docker
 //   /router/...         ponte para a API do roteador (http://10.0.0.1:8077/...), para usar fora de casa
 //   /push/registrar     o app manda o token de push dele (POST {token}); exige X-NM-Token
 //   /evento             o roteador avisa de aparelho novo no modo aprovação (POST); exige X-NM-Token
@@ -60,13 +61,13 @@ function upload(req, res) {
 }
 
 // ---- teste de internet pelo cabo ----------------------------------------
-const CF = 'speed.cloudflare.com';
-const agente = new https.Agent({ keepAlive: true, maxSockets: 16 });
+const CF = process.env.CF_HOST || 'speed.cloudflare.com';
+const agente = new https.Agent({ keepAlive: true, maxSockets: 32 });
 
 function pingCF() {
   return new Promise((ok) => {
     const t0 = process.hrtime.bigint();
-    const r = https.get({ host: CF, path: '/__down?bytes=0', agent: agente }, (res) => {
+    const r = https.get({ host: CF, port: CF_PORT, path: '/__down?bytes=0', agent: agente }, (res) => {
       res.resume();
       res.on('end', () => ok(Number(process.hrtime.bigint() - t0) / 1e6));
     });
@@ -75,79 +76,109 @@ function pingCF() {
   });
 }
 
-function baixarPor(ms, fluxos) {
+// O caminho até a Cloudflare é longo (~60 ms pela TIM, contra 2 ms do fast.com, que mede dentro da rede da
+// operadora). Num caminho longo cada conexão demora a acelerar; por isso: muitas conexões em paralelo e os
+// primeiros segundos descartados (a taxa é medida só depois do aquecimento).
+const CF_PORT = Number(process.env.CF_PORT || 443);
+const AQUECIMENTO_MS = 2000;
+
+function medirTaxa(ms, contar) {
+  // contar() devolve o total de bytes até agora; mede do fim do aquecimento até o fim do teste
   return new Promise((fim) => {
-    let bytes = 0;
-    const abertos = new Set();
     const t0 = Date.now();
-    const limite = t0 + ms;
-    let acabou = false;
-    const abrir = () => {
-      if (acabou || Date.now() >= limite) return;
-      const r = https.get({ host: CF, path: '/__down?bytes=99999999', agent: agente }, (res) => {
-        res.on('data', (c) => { bytes += c.length; });
-        res.on('end', () => { abertos.delete(r); abrir(); });
-        res.on('error', () => {});
-      });
-      r.on('error', () => { abertos.delete(r); });
-      abertos.add(r);
-    };
-    for (let i = 0; i < fluxos; i++) abrir();
+    let base = null;
+    setTimeout(() => { base = { bytes: contar(), t: Date.now() }; }, Math.min(AQUECIMENTO_MS, ms / 2));
     setTimeout(() => {
-      acabou = true;
-      for (const r of abertos) r.destroy();
-      fim({ bytes, secs: (Date.now() - t0) / 1000 });
+      const agora = Date.now();
+      const total = contar();
+      const b = base || { bytes: 0, t: t0 };
+      fim({ bytes: total, util: total - b.bytes, secs: (agora - b.t) / 1000 });
     }, ms);
   });
 }
 
+function baixarPor(ms, fluxos) {
+  let bytes = 0;
+  const abertos = new Set();
+  const limite = Date.now() + ms;
+  let acabou = false;
+  const abrir = () => {
+    if (acabou || Date.now() >= limite) return;
+    const r = https.get({ host: CF, port: CF_PORT, path: '/__down?bytes=99999999', agent: agente }, (res) => {
+      res.on('data', (c) => { bytes += c.length; });
+      res.on('end', () => { abertos.delete(r); abrir(); });
+      res.on('error', () => {});
+    });
+    r.on('error', () => { abertos.delete(r); });
+    abertos.add(r);
+  };
+  for (let i = 0; i < fluxos; i++) abrir();
+  return medirTaxa(ms, () => bytes).then((m) => {
+    acabou = true;
+    for (const r of abertos) r.destroy();
+    return m;
+  });
+}
+
 function enviarPor(ms, fluxos) {
-  return new Promise((fim) => {
-    let bytes = 0;
-    const abertos = new Set();
-    const t0 = Date.now();
-    let acabou = false;
-    const abrir = () => {
-      const r = https.request({ host: CF, path: '/__up', method: 'POST', agent: agente,
-        headers: { 'Content-Type': 'application/octet-stream' } });
-      r.on('response', (res) => res.resume());
-      r.on('error', () => {});
-      abertos.add(r);
-      const escrever = () => {
-        while (!acabou) {
-          const ok = r.write(BLOCO, () => { if (!acabou) bytes += BLOCO.length; });
-          if (!ok) { r.once('drain', escrever); return; }
-        }
-      };
-      escrever();
+  let bytes = 0;
+  const abertos = new Set();
+  let acabou = false;
+  const abrir = () => {
+    const r = https.request({ host: CF, port: CF_PORT, path: '/__up', method: 'POST', agent: agente,
+      headers: { 'Content-Type': 'application/octet-stream' } });
+    r.on('response', (res) => res.resume());
+    r.on('error', () => {});
+    abertos.add(r);
+    const escrever = () => {
+      while (!acabou) {
+        const ok = r.write(BLOCO, () => { if (!acabou) bytes += BLOCO.length; });
+        if (!ok) { r.once('drain', escrever); return; }
+      }
     };
-    for (let i = 0; i < fluxos; i++) abrir();
-    setTimeout(() => {
-      acabou = true;
-      for (const r of abertos) r.destroy();
-      fim({ bytes, secs: (Date.now() - t0) / 1000 });
-    }, ms);
+    escrever();
+  };
+  for (let i = 0; i < fluxos; i++) abrir();
+  return medirTaxa(ms, () => bytes).then((m) => {
+    acabou = true;
+    for (const r of abertos) r.destroy();
+    return m;
+  });
+}
+
+// repasse do container para o ajudante no WSL
+function repassarWantest(req, res, u) {
+  const alvo = new URL(process.env.WANTEST_URL);
+  alvo.search = u.search;
+  const r = http.get(alvo, { timeout: 90000 }, (rr) => {
+    res.writeHead(rr.statusCode || 502, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    rr.pipe(res);
+  });
+  r.on('timeout', () => r.destroy(new Error('timeout')));
+  r.on('error', (e) => {
+    if (!res.headersSent) json(res, 502, { error: 'teste no WSL indisponível: ' + e.message });
   });
 }
 
 let testando = false;
 async function wantest(req, res, u) {
+  if (process.env.WANTEST_URL) return repassarWantest(req, res, u);
   if (testando) return json(res, 409, { error: 'busy' });
   testando = true;
   try {
-    const secs = Math.min(15, Math.max(3, Number(u.searchParams.get('secs')) || 8));
+    const secs = Math.min(15, Math.max(8, Number(u.searchParams.get('secs')) || 10));
     await pingCF();
     const pings = [];
     for (let i = 0; i < 5; i++) pings.push(await pingCF());
     const validos = pings.filter((x) => x != null).sort((a, b) => a - b);
-    const d = await baixarPor(secs * 1000, 6);
-    const s = await enviarPor(secs * 1000, 4);
+    const d = await baixarPor(secs * 1000, 12);
+    const s = await enviarPor(secs * 1000, 6);
     json(res, 200, {
-      down_mbps: +(d.bytes * 8 / d.secs / 1e6).toFixed(1),
-      up_mbps: +(s.bytes * 8 / s.secs / 1e6).toFixed(1),
+      down_mbps: +(d.util * 8 / d.secs / 1e6).toFixed(1),
+      up_mbps: +(s.util * 8 / s.secs / 1e6).toFixed(1),
       down_bytes: d.bytes, up_bytes: s.bytes,
       ping_ms: validos.length ? +validos[Math.floor(validos.length / 2)].toFixed(1) : null,
-      streams: 6,
+      streams: 12,
     });
   } catch (e) {
     json(res, 500, { error: String(e && e.message || e) });

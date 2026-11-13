@@ -19,6 +19,8 @@ services:
     environment:
       PORT: "9092"
       ROUTER: "http://10.0.0.1:8077"
+      # o teste de internet roda no WSL (serviço rede-teste): no container a saída fica em ~100 Mb/s
+      WANTEST_URL: "http://host.docker.internal:9093/wantest"
     ports:
       - "9092:9092"
     mem_limit: 128m

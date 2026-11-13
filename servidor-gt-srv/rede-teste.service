@@ -1,0 +1,18 @@
+# Teste de internet do app Rede, fora do Docker (no container a saída para a internet fica em ~100 Mb/s).
+# É o mesmo server.js do container, rodando no WSL na porta 9093; o container repassa o /wantest para cá.
+# Instalar: sudo cp ~/rede-srv/rede-teste.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#           sudo systemctl enable --now rede-teste
+[Unit]
+Description=Rede: teste de internet fora do Docker (porta 9093, para o rede-srv)
+After=network-online.target
+
+[Service]
+User=gtm
+Environment=PORT=9093
+Environment=DADOS=/home/gtm/rede-srv/dados-teste
+ExecStart=/usr/bin/node /home/gtm/rede-srv/server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
