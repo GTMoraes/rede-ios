@@ -62,17 +62,22 @@ function upload(req, res) {
 
 // ---- teste de internet pelo cabo ----------------------------------------
 const CF = process.env.CF_HOST || 'speed.cloudflare.com';
-const agente = new https.Agent({ keepAlive: true, maxSockets: 32 });
+// um agente novo a cada teste (destruído no fim): reaproveitar entre testes deixava vagas presas e o teste
+// seguinte esperava para sempre
+let agente = new https.Agent({ keepAlive: true, maxSockets: 32 });
 
 function pingCF() {
   return new Promise((ok) => {
     const t0 = process.hrtime.bigint();
+    let feito = false;
+    const fim = (v) => { if (!feito) { feito = true; clearTimeout(prazo); ok(v); } };
     const r = https.get({ host: CF, port: CF_PORT, path: '/__down?bytes=0', agent: agente }, (res) => {
       res.resume();
-      res.on('end', () => ok(Number(process.hrtime.bigint() - t0) / 1e6));
+      res.on('end', () => fim(Number(process.hrtime.bigint() - t0) / 1e6));
     });
-    r.on('error', () => ok(null));
-    r.setTimeout(5000, () => r.destroy());
+    r.on('error', () => fim(null));
+    // prazo próprio: vale também enquanto o pedido espera uma conexão livre
+    const prazo = setTimeout(() => { r.destroy(); fim(null); }, 5000);
   });
 }
 
@@ -160,11 +165,13 @@ function repassarWantest(req, res, u) {
   });
 }
 
-let testando = false;
+let testando = 0;  // hora em que o teste atual começou (0 = nenhum)
 async function wantest(req, res, u) {
   if (process.env.WANTEST_URL) return repassarWantest(req, res, u);
-  if (testando) return json(res, 409, { error: 'busy' });
-  testando = true;
+  // um teste leva ~30 s; se a marca tem mais de 2 min, o anterior se perdeu e pode começar outro
+  if (testando && Date.now() - testando < 120000) return json(res, 409, { error: 'busy' });
+  testando = Date.now();
+  agente = new https.Agent({ keepAlive: true, maxSockets: 32 });
   try {
     const secs = Math.min(15, Math.max(8, Number(u.searchParams.get('secs')) || 10));
     await pingCF();
@@ -183,7 +190,8 @@ async function wantest(req, res, u) {
   } catch (e) {
     json(res, 500, { error: String(e && e.message || e) });
   } finally {
-    testando = false;
+    testando = 0;
+    agente.destroy();
   }
 }
 

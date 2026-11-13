@@ -121,10 +121,18 @@ enum Rede {
         }
     }
 
+    /// Por que a última procura falhou (mensagem do iOS), para aparecer na tela.
+    static var ultimaFalha: String?
+
     private static func responde(_ url: URL, app: String, timeout: TimeInterval) async -> Bool {
         let r = pedido(url, timeout: timeout, token: false)
-        guard let id = try? await json(Identidade.self, r) else { return false }
-        return id.app == app
+        do {
+            let id = try await json(Identidade.self, r)
+            return id.app == app
+        } catch {
+            ultimaFalha = "\(url.host ?? ""): \(error.localizedDescription)"
+            return false
+        }
     }
 
     /// Em casa o roteador responde direto. Fora, o app passa pela ponte do GT-SRV (Tailscale).

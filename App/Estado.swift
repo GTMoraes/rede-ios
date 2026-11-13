@@ -39,6 +39,7 @@ final class Estado {
             erro = modo == .soServidor
                 ? "O GT-SRV respondeu, mas o roteador não. Confira se a API do roteador está instalada."
                 : "Não achei o roteador nem o GT-SRV. Em casa: Wi-Fi ligado. Fora: Tailscale ligada."
+                    + (Rede.ultimaFalha.map { "\n\nÚltimo erro: \($0)" } ?? "")
             return
         }
         do {

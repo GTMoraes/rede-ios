@@ -33,10 +33,11 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         # o roteador (10.0.0.1) e o GT-SRV (10.0.0.129) ficam na rede de casa: pede a permissão de Rede Local
         NSLocalNetworkUsageDescription: Para ler o status do roteador e medir a velocidade até ele e até o GT-SRV.
-        # roteador e GT-SRV respondem em http (LAN e Tailscale)
+        # roteador e GT-SRV respondem em http (LAN e Tailscale). Só NSAllowsArbitraryLoads: com NSAllowsLocalNetworking
+        # junto, o iOS ignora o "permitir tudo" e só libera endereço local; o 100.91.24.1 da Tailscale não conta como
+        # local, e o app não alcançava o GT-SRV fora de casa (o Safari, que não segue o ATS do app, alcançava)
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
-          NSAllowsLocalNetworking: true
         UILaunchScreen:
           UIColorName: Fundo
         UIApplicationSupportsIndirectInputEvents: true
